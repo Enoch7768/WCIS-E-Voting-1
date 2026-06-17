@@ -26,9 +26,12 @@ function gemini_extract_score_key($file_path) {
   \"pace\": { \"subject\": \"string\", \"pace_number\": \"string\", \"title\": \"string\" },
   \"version\": 1,
   \"questions\": [
-    { \"question_number\": \"1\", \"question_type\": \"multiple_choice|fill_blank\", \"correct_answer\": \"A\", \"acceptable_answers\": [\"A\"], \"points\": 1 }
+    { \"question_number\": \"1\", \"question_type\": \"multiple_choice|fill_blank\",
+      \"correct_answer\": \"A\", \"acceptable_answers\": [\"A\"], \"points\": 1,
+      \"page\": 1 }
   ]
 }
+If the document has multiple pages, try to determine the page number for each question. If unsure, set page to 1.
 Only return valid JSON.";
     $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
     $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
@@ -103,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         // Fetch all assignments for this student (teacher must have access)
         $stmt = $pdo->prepare("
             SELECT a.*, 
-                   (SELECT COUNT(*) FROM ocr_results WHERE assignment_id = a.id) as total_pages,
+                   (SELECT COUNT(*) FROM ocr_results WHERE assignment_id = a.id) as total_answers,
                    (SELECT COUNT(DISTINCT page_number) FROM ocr_results WHERE assignment_id = a.id) as unique_pages,
                    (SELECT COUNT(*) FROM help_requests WHERE assignment_id = a.id AND status = 'pending') as pending_help
             FROM assignments a
@@ -121,13 +124,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         ");
         $help_stmt->execute([$student_id]);
         $help_requests = $help_stmt->fetchAll(PDO::FETCH_ASSOC);
-        // Also get uploaded images per assignment (the first page image)
+        // Get the first page image for each assignment (lowest page_number)
         $image_stmt = $pdo->prepare("
-            SELECT DISTINCT assignment_id, image_path 
-            FROM ocr_results 
-            WHERE assignment_id IN (SELECT id FROM assignments WHERE student_id = ?)
-            AND image_path IS NOT NULL 
-            GROUP BY assignment_id
+            SELECT o1.assignment_id, o1.image_path 
+            FROM ocr_results o1
+            INNER JOIN (
+                SELECT assignment_id, MIN(page_number) as min_page
+                FROM ocr_results
+                WHERE image_path IS NOT NULL
+                GROUP BY assignment_id
+            ) o2 ON o1.assignment_id = o2.assignment_id AND o1.page_number = o2.min_page
+            WHERE o1.assignment_id IN (SELECT id FROM assignments WHERE student_id = ?)
         ");
         $image_stmt->execute([$student_id]);
         $images = $image_stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -300,7 +307,7 @@ foreach($all_assignments as $asm) {
 
 $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $ocr_queue = $pdo->query("
-    SELECT o.*, u.full_name as student_name, a.pace 
+    SELECT o.*, u.full_name as student_name, a.pace, o.page_number
     FROM ocr_results o
     JOIN assignments a ON o.assignment_id = a.id
     JOIN users u ON a.student_id = u.id
@@ -539,11 +546,12 @@ $pending_ocr_count = count($ocr_queue);
         <div class="toolbar"><h3 style="margin:0;">OCR Review Verification Queue (Low Confidence Flags)</h3></div>
         <div class="table-wrap">
             <table class="table">
-                <thead><tr><th>ID</th><th>Student Base</th><th>Target Assignment Code</th><th>Machine Value Result</th><th>Confidence Threshold</th><th>Action</th></tr></thead>
+                <thead><tr><th>ID</th><th>Page</th><th>Student Base</th><th>Target Assignment Code</th><th>Machine Value Result</th><th>Confidence Threshold</th><th>Action</th></tr></thead>
                 <tbody>
                 <?php foreach ($ocr_queue as $oq): ?>
                 <tr>
                     <td><?= $oq['id'] ?></td>
+                    <td><?= $oq['page_number'] ?? '?' ?></td>
                     <td><?= htmlspecialchars($oq['student_name']) ?></td>
                     <td><?= htmlspecialchars($oq['pace']) ?></td>
                     <td><code><?= htmlspecialchars($oq['extracted_answer']) ?></code></td>
@@ -555,7 +563,7 @@ $pending_ocr_count = count($ocr_queue);
                     <td><button class="btn btn--primary" onclick="openOcrReviewModal(<?= $oq['id'] ?>)">Audit</button></td>
                 </tr>
                 <?php endforeach; if(empty($ocr_queue)): ?>
-                <tr><td colspan="6" style="text-align:center; color:var(--muted);">No anomalies awaiting verification processing.</td></tr>
+                <tr><td colspan="7" style="text-align:center; color:var(--muted);">No anomalies awaiting verification processing.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -869,7 +877,7 @@ async function viewStudentProgress(studentId, studentName) {
     if (data.assignments.length === 0) {
         html += '<div style="color:var(--muted);">No assignments found.</div>';
     } else {
-        html += '<div class="table-wrap"><table class="table"><thead><tr><th>PACE</th><th>Due</th><th>Status</th><th>Pages</th><th>Images</th></tr></thead><tbody>';
+        html += '<div class="table-wrap"><table class="table"><thead><tr><th>PACE</th><th>Due</th><th>Status</th><th>Pages</th><th>Answers</th><th>Images</th></tr></thead><tbody>';
         data.assignments.forEach(a => {
             // Find image for this assignment
             let img = data.images ? data.images.find(i => i.assignment_id == a.id) : null;
@@ -883,7 +891,8 @@ async function viewStudentProgress(studentId, studentName) {
                 <td>${a.pace}</td>
                 <td>${a.due_date}</td>
                 <td><span class="badge badge--${a.status.toLowerCase().replace(' ', '')}">${a.status}</span></td>
-                <td>${a.unique_pages || 0} (total ${a.total_pages || 0})</td>
+                <td>${a.unique_pages || 0}</td>
+                <td>${a.total_answers || 0}</td>
                 <td>${imgHtml}</td>
             </tr>`;
         });

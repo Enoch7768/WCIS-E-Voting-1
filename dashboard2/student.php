@@ -215,17 +215,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if (isset($_FILES['submission_file'])) {
                     $files = $_FILES['submission_file'];
+                    // Sort files by name to assign page numbers in correct order
+                    $file_count = count($files['name']);
+                    $sorted_indices = range(0, $file_count - 1);
+                    usort($sorted_indices, function($a, $b) use ($files) {
+                        return strcasecmp($files['name'][$a], $files['name'][$b]);
+                    });
+
                     $uploaded_paths = [];
                     $allowed = ['jpg','jpeg','png','webp'];
                     if (!is_dir('uploads/submissions')) mkdir('uploads/submissions', 0755, true);
-                    for ($i = 0; $i < count($files['name']); $i++) {
-                        if ($files['error'][$i] !== 0) continue;
-                        $ext = strtolower(pathinfo($files['name'][$i], PATHINFO_EXTENSION));
+
+                    // Process files in sorted order
+                    for ($i = 0; $i < $file_count; $i++) {
+                        $idx = $sorted_indices[$i];
+                        if ($files['error'][$idx] !== 0) continue;
+                        $ext = strtolower(pathinfo($files['name'][$idx], PATHINFO_EXTENSION));
                         if (!in_array($ext, $allowed)) continue;
                         $destPath = 'uploads/submissions/' . uniqid('sub_', true) . '.' . $ext;
-                        move_uploaded_file($files['tmp_name'][$i], $destPath);
+                        move_uploaded_file($files['tmp_name'][$idx], $destPath);
                         $uploaded_paths[] = $destPath;
                     }
+
                     if (empty($uploaded_paths)) throw new Exception('No valid images uploaded.');
 
                     $pdo->prepare("DELETE FROM ocr_results WHERE assignment_id = ?")->execute([$asm_id]);
@@ -472,7 +483,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
             <div class="stat-box"><h4>Assigned PACEs</h4><p><?= $total_assigned ?></p></div>
             <div class="stat-box"><h4>Active Modules</h4><p><?= $active_paces ?></p></div>
             <div class="stat-box"><h4>Completed Tasks</h4><p><?= $completed_paces ?></p></div>
-            <div class="stat-box"><h4>Correction Pipeline</h4><p><?= $requires_correction ?></p></div>
+            <div class="stat-box"><h4>Corrections Required</h4><p><?= $requires_correction ?></p></div>
         </div>
         <div class="toolbar" style="margin-top: 12px; padding: 14px; background: rgba(255,255,255,0.02); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); align-items: center;">
             <div>
@@ -484,7 +495,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
         <div class="toolbar" style="margin-top:24px;"><h3 style="margin:0;">My Assigned PACE Modules</h3></div>
         <div class="table-wrap">
             <table class="table">
-                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Pipeline Evaluation Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Completion Status</th><th>Actions</th></tr></thead>
                 <tbody>
                 <?php foreach ($my_assignments as $asm): ?>
                 <tr>
@@ -621,8 +632,7 @@ async function openAssignmentDetails(asmId) {
             <div><strong>PACE Module Identifier:</strong> ${data.pace}</div>
             <div><strong>Assigned Supervisory Teacher:</strong> ${data.teacher_name} (${data.teacher_email})</div>
             <div><strong>Milestone Deadline Cap:</strong> ${data.due_date}</div>
-            <div><strong>Active State Pipeline Phase:</strong> <span class="badge">${data.status}</span></div>
-            <div><strong>Active Framework Key Blueprint Version:</strong> <code>${data.key_version || 'Draft Matrice Processing Context'}</code></div>
+            <div><strong>Completion Status Phase:</strong> <span class="badge">${data.status}</span></div>
         `;
         openModal('assignmentModal');
     }
