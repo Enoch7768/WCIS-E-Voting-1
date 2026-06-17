@@ -8,20 +8,16 @@ require_student();
 $notice = null;
 $error = null;
 
-// Fetch positions
 $positions = $pdo->query('SELECT * FROM positions ORDER BY id ASC')->fetchAll();
 
-// Fetch candidates grouped by position
 $candidates_by_position = [];
 foreach ($positions as $pos) {
-    // FIXED: Changed 'full_name' to 'name AS full_name' to match DB schema without breaking UI variable keys
     $stmt = $pdo->prepare('SELECT id, name AS full_name, image FROM candidates WHERE position_id=? ORDER BY id ASC');
     $stmt->execute([$pos['id']]);
     $candidates_by_position[$pos['id']] = $stmt->fetchAll();
 }
 
-// Check user votes per position
-// FIXED: Joined candidates table to pull the position_id, since votes table doesn't have it natively
+
 $user_votes_stmt = $pdo->prepare('
     SELECT c.position_id, v.candidate_id 
     FROM votes v
@@ -29,9 +25,8 @@ $user_votes_stmt = $pdo->prepare('
     WHERE v.user_id = ?
 ');
 $user_votes_stmt->execute([$_SESSION['user_id']]);
-$user_votes = $user_votes_stmt->fetchAll(PDO::FETCH_KEY_PAIR); // [position_id => candidate_id]
+$user_votes = $user_votes_stmt->fetchAll(PDO::FETCH_KEY_PAIR); 
 
-// Handle voting
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_check($_POST['csrf'] ?? '')) {
         $error = 'Invalid CSRF token.';
@@ -43,7 +38,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (isset($user_votes[$position_id])) {
             $error = 'You have already voted for this position.';
         } else {
-            // FIXED: Removed 'position_id' from the INSERT query because it isn't in your SQL schema
             $stmt = $pdo->prepare('INSERT INTO votes (user_id, candidate_id) VALUES (?, ?)');
             $stmt->execute([$_SESSION['user_id'], $candidate_id]);
             $notice = 'Your vote has been recorded.';
