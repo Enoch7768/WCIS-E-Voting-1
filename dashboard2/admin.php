@@ -200,8 +200,8 @@ body {
 }
 
 .logo {
-	width: 38px;
-	height: 38px;
+	width: 70px;
+	height: 70px;
 	border-radius: 12px;
 	background: linear-gradient(135deg, var(--primary), #9eaaff);
 	box-shadow: 0 6px 24px rgba(110, 139, 255, .45);
