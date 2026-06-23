@@ -316,7 +316,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
             <div class="stat-box"><h4>Assigned PACEs</h4><p><?= $total_assigned ?></p></div>
             <div class="stat-box"><h4>Active Modules</h4><p><?= $active_paces ?></p></div>
             <div class="stat-box"><h4>Completed Tasks</h4><p><?= $completed_paces ?></p></div>
-            <div class="stat-box"><h4>Correction Pipeline</h4><p><?= $requires_correction ?></p></div>
+            <div class="stat-box"><h4>Corrections Required</h4><p><?= $requires_correction ?></p></div>
         </div>
         <div class="toolbar" style="margin-top: 12px; padding: 14px; background: rgba(255,255,255,0.02); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); align-items: center;">
             <div>
@@ -328,7 +328,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
         <div class="toolbar" style="margin-top:24px;"><h3 style="margin:0;">My Assigned PACE Modules</h3></div>
         <div class="table-wrap">
             <table class="table">
-                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Pipeline Evaluation Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Completion Status</th><th>Actions</th></tr></thead>
                 <tbody>
                 <?php foreach ($my_assignments as $asm): ?>
                 <tr>
@@ -421,8 +421,7 @@ async function openAssignmentDetails(asmId) {
             <div><strong>PACE Module Identifier:</strong> ${data.pace}</div>
             <div><strong>Assigned Supervisory Teacher:</strong> ${data.teacher_name} (${data.teacher_email})</div>
             <div><strong>Milestone Deadline Cap:</strong> ${data.due_date}</div>
-            <div><strong>Active State Pipeline Phase:</strong> <span class="badge">${data.status}</span></div>
-            <div><strong>Active Framework Key Blueprint Version:</strong> <code>${data.key_version || 'Draft Matrice Processing Context'}</code></div>
+            <div><strong>Completion Status Phase:</strong> <span class="badge">${data.status}</span></div>
         `;
         openModal('assignmentModal');
     }

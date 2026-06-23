@@ -34,6 +34,7 @@ function gemini_extract_score_key($file_path) {
     }
   ]
 }
+If the document has multiple pages, try to determine the page number for each question. If unsure, set page to 1.
 Only return valid JSON.";
     $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
     $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
