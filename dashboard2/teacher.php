@@ -467,7 +467,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
             <div class="stat-box"><h4>Active Tasks</h4><p><?= $active_assignments_count ?></p></div>
             <div class="stat-box"><h4>Corrections Required</h4><p><?= $correction_queue_count ?></p></div>
         </div>
-        <div class="toolbar"><h3 style="margin:0;">Assigned Students Roster</h3></div>
+        <div class="toolbar"><h3 style="margin:0;">Assigned Students</h3></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>ID</th><th>Student Name</th><th>Email</th><th>Total Tasks</th><th>Actions</th></tr></thead>
@@ -490,7 +490,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
                 </tbody>
             </table>
         </div>
-        <div class="toolbar"><h3 style="margin:0;">Active Academic Assignments Pipeline</h3></div>
+        <div class="toolbar"><h3 style="margin:0;">Active Academic Assignments</h3></div>
         <div class="table-wrap">
             <table class="table">
                 <thead><tr><th>ID</th><th>Student</th><th>PACE Code</th><th>Due Date</th><th>Workflow Status</th><th>Actions</th></tr></thead>
@@ -502,7 +502,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
                     <td><?= htmlspecialchars($asm['pace']) ?></td>
                     <td><?= htmlspecialchars($asm['due_date']) ?></td>
                     <td><span class="badge badge--<?= strtolower(str_replace(' ', '', $asm['status'])) ?>"><?= $asm['status'] ?></span></td>
-                    <td><button class="btn btn--ghost" onclick="openAssignmentViewer(<?= $asm['id'] ?>)">Review Parameters</button></td>
+                    <td><button class="btn btn--ghost" onclick="openAssignmentViewer(<?= $asm['id'] ?>)">Review</button></td>
                 </tr>
                 <?php endforeach; if(empty($all_assignments)): ?>
                 <tr><td colspan="6" style="text-align:center; color:var(--muted);">No active curriculum assignments mapped.</td></tr>
@@ -511,7 +511,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
             </table>
         </div>
         <div class="toolbar">
-            <h3 style="margin:0;">Score Key Configuration & Engine Manifest</h3>
+            <h3 style="margin:0;">Score Key Configuration</h3>
             <button class="btn btn--primary" onclick="openUploadKeyModal()">+ Upload Score Key Document</button>
         </div>
         <div class="table-wrap">
@@ -559,11 +559,11 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="assign_pace">
                 <input type="hidden" name="student_id" id="pace_student_id">
-                <label class="label">PACE Code Identity</label>
+                <label class="label">PACE Name</label>
                 <input class="input" name="pace" placeholder="e.g. PACE-1082" required>
-                <label class="label">Reference Target Score Key Dataset Mapping</label>
+                <label class="label">Score Key</label>
                 <select class="select" name="score_key_id" required>
-                    <option value="">-- Assign Answer Map Context --</option>
+                    <option value="">-- Assign Score Key --</option>
                     <?php foreach($score_keys as $key): if($key['is_published']): ?>
                     <option value="<?= $key['id'] ?>"><?= htmlspecialchars($key['pace']) ?> (<?= htmlspecialchars($key['version']) ?>)</option>
                     <?php endif; endforeach; ?>
@@ -581,14 +581,14 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
 <div class="modal" id="uploadKeyModal">
     <div class="modal__content">
         <div class="modal__head">
-            <h3 class="modal__title">Ingest Original Source Score Key</h3>
+            <h3 class="modal__title">Process Original Source Score Key</h3>
             <button class="btn btn--ghost" onclick="closeModal('uploadKeyModal')">✕</button>
         </div>
         <div class="modal__body">
             <form method="POST" enctype="multipart/form-data" class="form">
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="upload_score_key">
-                <label class="label">Target Subject Component (PACE Reference)</label>
+                <label class="label">PACE Title</label>
                 <input class="input" name="pace_title" placeholder="e.g. Mathematics 1021" required>
                 <label class="label">Score Key Type</label>
                 <select class="select" name="score_key_type" id="score_key_type" onchange="togglePaceRange()">
@@ -605,7 +605,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
                         <input class="input" type="number" name="pace_end" id="pace_end" min="1" value="1005">
                     </div>
                 </div>
-                <label class="label">Document Resource Package (Supported: PDF, PNG, JPG)</label>
+                <label class="label">Score Key (Supported: PDF, PNG, JPG)</label>
                 <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required>
                 <p class="helper-text">Uploading initializes the engine pipeline to auto-generate answer matching structures automatically.</p>
                 <button type="submit" class="btn btn--primary" style="margin-top:12px">Engage Extraction Engine</button>
@@ -627,7 +627,7 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="update_assignment_status">
                 <input type="hidden" name="assignment_id" id="lifecycle_assignment_id">
-                <label class="label">Update Operational Pipeline Status</label>
+                <label class="label">Update Status</label>
                 <select class="select" name="status" required>
                     <option value="In Progress">In Progress</option>
                     <option value="Needs Correction">Needs Correction (Flag Error Loop)</option>

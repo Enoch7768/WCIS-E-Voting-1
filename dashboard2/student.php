@@ -323,7 +323,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
                 <h4 style="margin:0; font-size:14px; color: var(--text);">Assigned Primary Academic Instructor</h4>
                 <p style="margin:4px 0 0; font-size:13px; color: var(--muted);"><?= htmlspecialchars($my_teacher['full_name']) ?> — <code><?= htmlspecialchars($my_teacher['email']) ?></code></p>
             </div>
-            <button class="btn btn--primary" onclick="openChatModal()">Open Direct Line Messages</button>
+            <button class="btn btn--primary" onclick="openChatModal()">Open Chat</button>
         </div>
         <div class="toolbar" style="margin-top:24px;"><h3 style="margin:0;">My Assigned PACE Modules</h3></div>
         <div class="table-wrap">
@@ -379,7 +379,7 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
 <div class="modal" id="chatModal">
     <div class="modal__content">
         <div class="modal__head">
-            <h3 class="modal__title">Direct Academic Line Workspace</h3>
+            <h3 class="modal__title">Chat</h3>
             <button class="btn btn--ghost" onclick="closeModal('chatModal')">✕</button>
         </div>
         <div class="modal__body" style="display:flex; flex-direction:column; gap:12px;">

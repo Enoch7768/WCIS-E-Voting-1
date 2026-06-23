@@ -1,5 +1,5 @@
 <?php
-// Replace with your actual Gemini API key
+
 $api_key = 'AQ.Ab8RN6LaYhJ9B5YfvxcAZNuTUYBBJX-kQtIUkxTNM138ctkG2Q';
 
 $url = "https://generativelanguage.googleapis.com/v1beta/models?key=" . urlencode($api_key);
