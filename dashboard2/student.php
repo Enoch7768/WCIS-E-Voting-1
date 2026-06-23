@@ -16,64 +16,6 @@ function send_notification($user_id, $sender_id, $type, $message, $link = null) 
     $stmt->execute([$user_id, $sender_id, $type, $message, $link]);
 }
 
-function gemini_extract_answers($image_path, $questions_json) {
-    $api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : getenv('GEMINI_API_KEY');
-    if (empty($api_key)) throw new Exception('Gemini API key is not configured.');
-    $image_data = base64_encode(file_get_contents($image_path));
-    $mime = mime_content_type($image_path);
-    $prompt = "Extract student answers from this exam page. The questions are: " . json_encode($questions_json) .
-              " Return a JSON array with objects: {'question_number': string, 'extracted_answer': string, 'confidence': float (0-1)}. Only return valid JSON.";
-    $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
-    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    if ($http_code !== 200) throw new Exception("Gemini API error: $response");
-    $data = json_decode($response, true);
-    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    preg_match('/\[.*\]/s', $text, $matches);
-    $json = $matches[0] ?? '[]';
-    return json_decode($json, true);
-}
-
-function gemini_explain_answer($question_number, $student_answer, $correct_answer, $image_path = null) {
-    $api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : getenv('GEMINI_API_KEY');
-    if (empty($api_key)) throw new Exception('Gemini API key not configured.');
-    $parts = [];
-    $prompt = "The student answered '$student_answer' for question $question_number. The correct answer is '$correct_answer'. Explain the concept and why the student's answer is incorrect. Provide a helpful, concise explanation. If you have the image, use it for context.";
-    $parts[] = ['text' => $prompt];
-    if ($image_path && file_exists($image_path)) {
-        $image_data = base64_encode(file_get_contents($image_path));
-        $mime = mime_content_type($image_path);
-        $parts[] = ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]];
-    }
-    $payload = ['contents' => [[ 'parts' => $parts ]]];
-    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    if ($http_code !== 200) throw new Exception("Gemini API error: $response");
-    $data = json_decode($response, true);
-    return $data['candidates'][0]['content']['parts'][0]['text'] ?? 'Explanation not available.';
-}
-
-function find_correct_answer($qnum, $question_structure) {
-    foreach ($question_structure['questions'] as $q) {
-        if ((string)$q['question_number'] === (string)$qnum) {
-            return $q['correct_answer'] ?? '';
-        }
-    }
-    return '';
-}
-
 // ---------- AJAX GET handlers ----------
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
     header('Content-Type: application/json');
@@ -92,16 +34,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         echo json_encode($stmt->fetch(PDO::FETCH_ASSOC) ?: ['error' => 'Data record inaccessible']);
         exit;
     }
-    if ($action === 'get_ocr_results' && isset($_GET['assignment_id'])) {
+    if ($action === 'get_score_key_details' && isset($_GET['assignment_id'])) {
         $asm_id = (int)$_GET['assignment_id'];
         $stmt = $pdo->prepare("
-            SELECT o.* FROM ocr_results o
-            JOIN assignments a ON o.assignment_id = a.id
+            SELECT sk.file_path, sk.question_structure 
+            FROM assignments a
+            LEFT JOIN score_keys sk ON a.score_key_id = sk.id
             WHERE a.id = ? AND a.student_id = ?
-            ORDER BY o.page_number ASC, o.question_number ASC
         ");
         $stmt->execute([$asm_id, $student_id]);
-        echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+        $data = $stmt->fetch();
+        if ($data && $data['question_structure']) {
+            echo json_encode([
+                'file_path' => $data['file_path'],
+                'question_structure' => json_decode($data['question_structure'], true)
+            ]);
+        } else {
+            echo json_encode(['error' => 'Score key not available for this assignment.']);
+        }
         exit;
     }
     if ($action === 'get_chat_stream') {
@@ -129,71 +79,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         echo json_encode(['status' => 'ok']);
         exit;
     }
-    if ($action === 'get_failed_questions' && isset($_GET['assignment_id'])) {
-        $asm_id = (int)$_GET['assignment_id'];
-        // Get assignment details to retrieve correct answers from score key
-        $stmt = $pdo->prepare("SELECT sk.question_structure FROM assignments a LEFT JOIN score_keys sk ON a.score_key_id = sk.id WHERE a.id = ? AND a.student_id = ?");
-        $stmt->execute([$asm_id, $student_id]);
-        $row = $stmt->fetch();
-        if (!$row || empty($row['question_structure'])) {
-            echo json_encode(['error' => 'Score key not available']);
-            exit;
-        }
-        $questions = json_decode($row['question_structure'], true);
-        // Get incorrect OCR results for this assignment
-        $stmt = $pdo->prepare("SELECT * FROM ocr_results WHERE assignment_id = ? AND is_correct = 0 ORDER BY page_number, question_number");
-        $stmt->execute([$asm_id]);
-        $failed = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        // Add correct answer and question text if available
-        foreach ($failed as &$f) {
-            $f['correct_answer'] = find_correct_answer($f['question_number'], $questions);
-            foreach ($questions['questions'] as $q) {
-                if ((string)$q['question_number'] === (string)$f['question_number']) {
-                    $f['question_text'] = $q['question_text'] ?? '';
-                    break;
-                }
-            }
-        }
-        echo json_encode($failed);
-        exit;
-    }
-    if ($action === 'get_help_explanation' && isset($_GET['ocr_id'])) {
-        $ocr_id = (int)$_GET['ocr_id'];
-        // Fetch OCR record including image_path
-        $stmt = $pdo->prepare("SELECT o.*, a.score_key_id FROM ocr_results o JOIN assignments a ON o.assignment_id = a.id WHERE o.id = ? AND a.student_id = ?");
-        $stmt->execute([$ocr_id, $student_id]);
-        $ocr = $stmt->fetch();
-        if (!$ocr) { echo json_encode(['error' => 'Record not found']); exit; }
-        // Get correct answer from score key
-        $stmt = $pdo->prepare("SELECT question_structure FROM score_keys WHERE id = ?");
-        $stmt->execute([$ocr['score_key_id']]);
-        $sk = $stmt->fetch();
-        if (!$sk) { echo json_encode(['error' => 'Score key missing']); exit; }
-        $questions = json_decode($sk['question_structure'], true);
-        $correct = find_correct_answer($ocr['question_number'], $questions);
-        // Check if help request already exists
-        $stmt = $pdo->prepare("SELECT * FROM help_requests WHERE student_id = ? AND assignment_id = ? AND question_number = ?");
-        $stmt->execute([$student_id, $ocr['assignment_id'], $ocr['question_number']]);
-        $existing = $stmt->fetch();
-        if ($existing && $existing['status'] === 'answered') {
-            echo json_encode(['explanation' => $existing['gemini_explanation']]);
-            exit;
-        }
-        // Generate explanation with image if available
-        $image_path = $ocr['image_path'] ?? null;
-        $explanation = gemini_explain_answer($ocr['question_number'], $ocr['extracted_answer'], $correct, $image_path);
-        // Store in help_requests
-        if ($existing) {
-            $stmt = $pdo->prepare("UPDATE help_requests SET gemini_explanation = ?, status = 'answered' WHERE id = ?");
-            $stmt->execute([$explanation, $existing['id']]);
-        } else {
-            $stmt = $pdo->prepare("INSERT INTO help_requests (student_id, assignment_id, question_number, extracted_answer, correct_answer, gemini_explanation, status) VALUES (?, ?, ?, ?, ?, ?, 'answered')");
-            $stmt->execute([$student_id, $ocr['assignment_id'], $ocr['question_number'], $ocr['extracted_answer'], $correct, $explanation]);
-        }
-        // Notify teacher (optional)
-        echo json_encode(['explanation' => $explanation]);
-        exit;
-    }
 }
 
 // ---------- POST handlers ----------
@@ -203,72 +88,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $action = $_POST['action'] ?? '';
         try {
-            if ($action === 'upload_submission' || $action === 'upload_correction') {
+            if ($action === 'submit_self_score') {
                 $asm_id = (int)($_POST['assignment_id'] ?? 0);
-                $chk = $pdo->prepare("SELECT a.status, a.score_key_id, sk.question_structure, ts.teacher_id FROM assignments a LEFT JOIN score_keys sk ON a.score_key_id = sk.id JOIN teacher_student ts ON a.student_id = ts.student_id WHERE a.id = ? AND a.student_id = ?");
+                $scores = $_POST['scores'] ?? [];
+                if (!$asm_id || empty($scores)) throw new Exception('No scores provided.');
+
+                $chk = $pdo->prepare("SELECT id FROM assignments WHERE id = ? AND student_id = ?");
                 $chk->execute([$asm_id, $student_id]);
-                $asm_data = $chk->fetch();
-                if (!$asm_data) throw new Exception('Assignment context mismatch.');
-                if (empty($asm_data['question_structure'])) throw new Exception('Score key not published or missing question structure.');
-                $questions = json_decode($asm_data['question_structure'], true);
-                $teacher_id = $asm_data['teacher_id'];
+                if (!$chk->fetch()) throw new Exception('Invalid assignment.');
 
-                if (isset($_FILES['submission_file'])) {
-                    $files = $_FILES['submission_file'];
-                    $uploaded_paths = [];
-                    $allowed = ['jpg','jpeg','png','webp'];
-                    if (!is_dir('uploads/submissions')) mkdir('uploads/submissions', 0755, true);
-                    for ($i = 0; $i < count($files['name']); $i++) {
-                        if ($files['error'][$i] !== 0) continue;
-                        $ext = strtolower(pathinfo($files['name'][$i], PATHINFO_EXTENSION));
-                        if (!in_array($ext, $allowed)) continue;
-                        $destPath = 'uploads/submissions/' . uniqid('sub_', true) . '.' . $ext;
-                        move_uploaded_file($files['tmp_name'][$i], $destPath);
-                        $uploaded_paths[] = $destPath;
-                    }
-                    if (empty($uploaded_paths)) throw new Exception('No valid images uploaded.');
+                // Clear previous self-scores
+                $pdo->prepare("DELETE FROM self_scores WHERE assignment_id = ? AND student_id = ?")->execute([$asm_id, $student_id]);
 
-                    $pdo->prepare("DELETE FROM ocr_results WHERE assignment_id = ?")->execute([$asm_id]);
-
-                    $all_extracted = [];
-                    $page = 1;
-                    foreach ($uploaded_paths as $path) {
-                        $extracted = gemini_extract_answers($path, $questions);
-                        foreach ($extracted as &$item) {
-                            $item['page_number'] = $page;
-                            $item['image_path'] = $path; // store image path for each answer
-                        }
-                        $all_extracted = array_merge($all_extracted, $extracted);
-                        $page++;
-                    }
-
-                    $insert = $pdo->prepare("INSERT INTO ocr_results (assignment_id, question_number, extracted_answer, confidence, status, page_number, image_path) VALUES (?, ?, ?, ?, ?, ?, ?)");
-                    foreach ($all_extracted as $item) {
-                        $confidence = isset($item['confidence']) ? (float)$item['confidence'] : 0.85;
-                        $status = ($confidence >= 0.80) ? 'Approved' : 'Pending Review';
-                        $insert->execute([$asm_id, $item['question_number'], $item['extracted_answer'], $confidence, $status, $item['page_number'] ?? 1, $item['image_path'] ?? null]);
-                    }
-
-                    // Compare with score key and grade
-                    $update = $pdo->prepare("UPDATE ocr_results SET is_correct = ?, points_earned = ? WHERE id = ?");
-                    $ocr_rows = $pdo->prepare("SELECT id, question_number, extracted_answer FROM ocr_results WHERE assignment_id = ?");
-                    $ocr_rows->execute([$asm_id]);
-                    while ($row = $ocr_rows->fetch(PDO::FETCH_ASSOC)) {
-                        $correct = find_correct_answer($row['question_number'], $questions);
-                        $is_correct = (strcasecmp(trim($row['extracted_answer']), trim($correct)) === 0);
-                        $points = $is_correct ? 1 : 0;
-                        $update->execute([$is_correct, $points, $row['id']]);
-                    }
-
-                    $new_status = ($action === 'upload_correction') ? 'In Progress' : 'In Progress';
-                    $pdo->prepare("UPDATE assignments SET status = ? WHERE id = ?")->execute([$new_status, $asm_id]);
-
-                    send_notification($teacher_id, $student_id, 'submission', "Student submitted assignment #$asm_id (".count($uploaded_paths)." pages)");
-
-                    $notice = "Upload successful. Extracted answers from ".count($uploaded_paths)." pages. Grading completed.";
-                } else {
-                    throw new Exception('File upload missing.');
+                $insert = $pdo->prepare("INSERT INTO self_scores (assignment_id, student_id, question_number, is_correct) VALUES (?, ?, ?, ?)");
+                foreach ($scores as $qnum => $correct) {
+                    $insert->execute([$asm_id, $student_id, $qnum, (int)$correct]);
                 }
+
+                $pdo->prepare("UPDATE assignments SET status = 'Self-Scored' WHERE id = ?")->execute([$asm_id]);
+
+                echo json_encode(['status' => 'success']);
+                exit;
             }
 
             if ($action === 'send_chat_msg') {
@@ -439,6 +279,10 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
         .stat-box p { margin: 8px 0 0; font-size: 24px; font-weight: 700; color: var(--primary); }
         .notif-bell { position: relative; cursor: pointer; }
         .notif-badge { position: absolute; top: -8px; right: -8px; background: var(--danger); border-radius: 50%; padding: 2px 6px; font-size: 12px; display: none; }
+        .page-section { background: rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:12px; margin-bottom:16px; }
+        .page-section img, .page-section iframe { max-width:100%; border-radius:8px; margin-top:8px; }
+        .question-item { display:flex; align-items:center; gap:12px; margin:6px 0; }
+        .question-item label { display:inline-flex; align-items:center; gap:4px; }
     </style>
 </head>
 <body>
@@ -493,13 +337,9 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
                     <td><span class="badge badge--<?= strtolower(str_replace(' ', '', $asm['status'])) ?>"><?= $asm['status'] ?></span></td>
                     <td>
                         <button class="btn btn--ghost" onclick="openAssignmentDetails(<?= $asm['id'] ?>)">Review Framework</button>
-                        <?php if($asm['status'] === 'Needs Correction'): ?>
-                        <button class="btn btn--danger" onclick="openUploadModal(<?= $asm['id'] ?>, 'upload_correction')">Upload Corrections</button>
-                        <?php else: ?>
-                        <button class="btn btn--primary" onclick="openUploadModal(<?= $asm['id'] ?>, 'upload_submission')">Upload Work Pages</button>
+                        <?php if($asm['status'] !== 'Completed' && $asm['status'] !== 'Self-Scored'): ?>
+                        <button class="btn btn--success" onclick="openSelfScoreModal(<?= $asm['id'] ?>)">Self-Score</button>
                         <?php endif; ?>
-                        <button class="btn btn--ghost" onclick="openOcrVerificationView(<?= $asm['id'] ?>)">View OCR Output</button>
-                        <button class="btn btn--ghost" onclick="openFailedQuestions(<?= $asm['id'] ?>)">Review Incorrect</button>
                     </td>
                 </tr>
                 <?php endforeach; if(empty($my_assignments)): ?>
@@ -524,34 +364,14 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
     </div>
 </div>
 
-<div class="modal" id="uploadModal">
+<div class="modal" id="selfScoreModal">
     <div class="modal__content">
         <div class="modal__head">
-            <h3 class="modal__title" id="uploadModalTitle">Ingest Material Pages</h3>
-            <button class="btn btn--ghost" onclick="closeModal('uploadModal')">✕</button>
+            <h3 class="modal__title">Self-Score Your Work</h3>
+            <button class="btn btn--ghost" onclick="closeModal('selfScoreModal')">✕</button>
         </div>
         <div class="modal__body">
-            <form method="POST" enctype="multipart/form-data" class="form">
-                <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
-                <input type="hidden" name="action" id="upload_form_action" value="upload_submission">
-                <input type="hidden" name="assignment_id" id="upload_assignment_id">
-                <label class="label">Select Scanned Answer Sheet Pages (Supported: JPG, JPEG, PNG, WEBP)</label>
-                <input type="file" class="input" name="submission_file[]" accept="image/*" required multiple>
-                <button type="submit" class="btn btn--success" style="margin-top:12px;">Deliver Work Payload</button>
-            </form>
-        </div>
-    </div>
-</div>
-
-<div class="modal" id="ocrModal">
-    <div class="modal__content">
-        <div class="modal__head">
-            <h3 class="modal__title">Machine OCR Reading Output Manifest</h3>
-            <button class="btn btn--ghost" onclick="closeModal('ocrModal')">✕</button>
-        </div>
-        <div class="modal__body">
-            <p class="card__sub" style="margin-bottom:14px;">Review raw detected output fields extracted by the parsing system below.</p>
-            <div id="ocrVerificationContent" style="display:grid; gap:12px;"></div>
+            <div id="selfScoreContent"></div>
         </div>
     </div>
 </div>
@@ -588,29 +408,9 @@ $my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unalloc
     </div>
 </div>
 
-<!-- Modal for failed questions -->
-<div class="modal" id="failedModal">
-    <div class="modal__content">
-        <div class="modal__head">
-            <h3 class="modal__title">Incorrect Answers – Get AI Help</h3>
-            <button class="btn btn--ghost" onclick="closeModal('failedModal')">✕</button>
-        </div>
-        <div class="modal__body">
-            <div id="failedContent" style="display:grid; gap:16px;"></div>
-        </div>
-    </div>
-</div>
-
 <script>
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
-
-function openUploadModal(asmId, type) {
-    document.getElementById('upload_assignment_id').value = asmId;
-    document.getElementById('upload_form_action').value = type;
-    document.getElementById('uploadModalTitle').innerText = (type === 'upload_correction') ? 'Deliver Corrected Sheet Pages' : 'Deliver Completed Sheet Pages';
-    openModal('uploadModal');
-}
 
 async function openAssignmentDetails(asmId) {
     let r = await fetch('?action=get_assignment_details&assignment_id=' + asmId);
@@ -628,73 +428,75 @@ async function openAssignmentDetails(asmId) {
     }
 }
 
-async function openOcrVerificationView(asmId) {
-    let r = await fetch('?action=get_ocr_results&assignment_id=' + asmId);
-    let logs = await r.json();
-    let container = document.getElementById('ocrVerificationContent');
-    let markup = '';
-    logs.forEach(item => {
-        let correct = (item.is_correct === 1) ? '✅' : (item.is_correct === 0 ? '❌' : '⏳');
-        markup += `<div style="padding:10px; background:rgba(255,255,255,0.02); border-radius:8px; border:1px solid rgba(255,255,255,0.04); display:flex; justify-content:space-between; align-items:center;">
-            <div>
-                <span style="color:var(--muted); font-size:12px;">Page ${item.page_number} – Q${item.question_number}</span>
-                <div style="font-size:14px; font-weight:600; margin-top:2px;">Answer: "${item.extracted_answer}" ${correct}</div>
-            </div>
-            <div style="text-align:right;">
-                <span class="badge">${item.status}</span>
-                <div style="font-size:11px; color:var(--primary); margin-top:4px;">Confidence: ${(item.confidence * 100).toFixed(1)}%</div>
-                <div style="font-size:11px; color:var(--success);">Points: ${item.points_earned ?? '-'}</div>
-            </div>
-        </div>`;
+async function openSelfScoreModal(asmId) {
+    let r = await fetch('?action=get_score_key_details&assignment_id=' + asmId);
+    let data = await r.json();
+    if (data.error) { alert(data.error); return; }
+
+    let filePath = data.file_path;
+    let structure = data.question_structure;
+    let pages = structure.pages || [];
+
+    let html = '<div style="margin-bottom:16px;">';
+    // Display the score key file
+    if (filePath) {
+        let ext = filePath.split('.').pop().toLowerCase();
+        if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
+            html += `<img src="${filePath}" alt="Score Key" style="max-width:100%; max-height:400px; border-radius:8px; margin-bottom:12px;">`;
+        } else if (ext === 'pdf') {
+            html += `<iframe src="${filePath}" style="width:100%; height:400px; border-radius:8px; margin-bottom:12px;"></iframe>`;
+        } else {
+            html += `<a href="${filePath}" target="_blank" class="btn btn--primary">Download Score Key</a>`;
+        }
+    } else {
+        html += '<div style="color:var(--muted);">No score key file attached.</div>';
+    }
+    html += '</div>';
+
+    // Build question list
+    html += '<form id="selfScoreForm">';
+    html += '<input type="hidden" name="assignment_id" value="' + asmId + '">';
+    let hasQuestions = false;
+    pages.forEach(page => {
+        let pageNum = page.page_number || 1;
+        if (page.questions && page.questions.length) {
+            hasQuestions = true;
+            html += `<div class="page-section"><h4>Page ${pageNum}</h4>`;
+            page.questions.forEach(q => {
+                html += `<div class="question-item">
+                    <strong>Q${q.question_number}:</strong> ${q.question_text || ''}
+                    <span style="color:var(--muted);">(Correct: ${q.correct_answer})</span>
+                    <label><input type="radio" name="scores[${q.question_number}]" value="1"> Correct</label>
+                    <label><input type="radio" name="scores[${q.question_number}]" value="0"> Incorrect</label>
+                </div>`;
+            });
+            html += '</div>';
+        }
     });
-    container.innerHTML = markup || '<div style="color:var(--muted); text-align:center; font-size:13px; padding:12px;">No engine scans logged for this block configuration yet.</div>';
-    openModal('ocrModal');
-}
+    if (!hasQuestions) {
+        html += '<div style="color:var(--muted);">No questions found in this score key.</div>';
+    }
+    html += '<button type="submit" class="btn btn--success" style="margin-top:12px;">Submit Self-Score</button>';
+    html += '</form>';
 
-async function openFailedQuestions(asmId) {
-    let r = await fetch('?action=get_failed_questions&assignment_id=' + asmId);
-    let data = await r.json();
-    if(data.error) {
-        alert(data.error);
-        return;
-    }
-    let container = document.getElementById('failedContent');
-    if(data.length === 0) {
-        container.innerHTML = '<div style="color:var(--muted); text-align:center;">🎉 No incorrect answers found! Great job!</div>';
-    } else {
-        let markup = '';
-        data.forEach(item => {
-            markup += `
-                <div style="padding:12px; background:rgba(255,255,255,0.02); border-radius:8px; border:1px solid rgba(255,255,255,0.06);">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                        <strong>Question ${item.question_number}</strong>
-                    </div>
-                    <div style="font-size:13px; color:var(--muted);">Your answer: <span style="color:var(--danger);">${item.extracted_answer}</span></div>
-                    <div style="font-size:13px; color:var(--muted);">Correct answer: <span style="color:var(--success);">${item.correct_answer}</span></div>
-                    <div id="help_explanation_${item.id}" style="margin-top:8px; font-size:13px; color:var(--text); display:none;"></div>
-                </div>
-            `;
-        });
-        container.innerHTML = markup;
-    }
-    openModal('failedModal');
-}
+    document.getElementById('selfScoreContent').innerHTML = html;
 
-async function requestHelp(ocrId) {
-    let btn = event.target;
-    btn.disabled = true;
-    btn.textContent = 'Loading...';
-    let r = await fetch('?action=get_help_explanation&ocr_id=' + ocrId);
-    let data = await r.json();
-    btn.remove();
-    let div = document.getElementById('help_explanation_' + ocrId);
-    if(data.explanation) {
-        div.style.display = 'block';
-        div.innerHTML = '<strong>AI Explanation:</strong> ' + data.explanation;
-    } else {
-        div.style.display = 'block';
-        div.innerHTML = '<span style="color:var(--danger);">Sorry, could not retrieve explanation.</span>';
-    }
+    document.getElementById('selfScoreForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        let fd = new FormData(e.target);
+        fd.append('action', 'submit_self_score');
+        fd.append('csrf', '<?= csrf_token() ?>');
+        let resp = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+        let result = await resp.json();
+        if (result.status === 'success') {
+            alert('Self-score saved!');
+            location.reload();
+        } else {
+            alert(result.message || 'Error saving scores.');
+        }
+    });
+
+    openModal('selfScoreModal');
 }
 
 async function openChatModal() {

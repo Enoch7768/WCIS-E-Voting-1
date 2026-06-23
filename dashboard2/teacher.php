@@ -25,8 +25,13 @@ function gemini_extract_score_key($file_path) {
 {
   \"pace\": { \"subject\": \"string\", \"pace_number\": \"string\", \"title\": \"string\" },
   \"version\": 1,
-  \"questions\": [
-    { \"question_number\": \"1\", \"question_type\": \"multiple_choice|fill_blank\", \"correct_answer\": \"A\", \"acceptable_answers\": [\"A\"], \"points\": 1 }
+  \"pages\": [
+    {
+      \"page_number\": 1,
+      \"questions\": [
+        { \"question_number\": \"1\", \"question_type\": \"multiple_choice|fill_blank\", \"correct_answer\": \"A\", \"acceptable_answers\": [\"A\"], \"points\": 1 }
+      ]
+    }
   ]
 }
 Only return valid JSON.";
@@ -47,6 +52,35 @@ Only return valid JSON.";
     return json_decode($json, true);
 }
 
+function gemini_extract_multiple_score_keys($file_path) {
+    $api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : (getenv('GEMINI_API_KEY') ?: '');
+    if (empty($api_key)) { error_log('Gemini API key not defined'); return null; }
+    $image_data = base64_encode(file_get_contents($file_path));
+    $mime = mime_content_type($file_path);
+    $prompt = "This document contains answer keys for multiple PACE numbers, each on a separate page. Extract the answer key for each page. Return a JSON array where each element has:
+{
+  \"page_number\": integer,
+  \"pace\": { \"subject\": \"string\", \"pace_number\": \"string\", \"title\": \"string\" },
+  \"questions\": [ { \"question_number\": \"1\", \"correct_answer\": \"A\" } ]
+}
+Only return valid JSON array.";
+    $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
+    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($http_code !== 200) throw new Exception("Gemini API error: $response");
+    $data = json_decode($response, true);
+    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
+    preg_match('/\[.*\]/s', $text, $matches);
+    $json = $matches[0] ?? '[]';
+    return json_decode($json, true);
+}
+
 // ---------- AJAX GET handlers ----------
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
     header('Content-Type: application/json');
@@ -62,13 +96,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
             WHERE a.id = ? AND ts.teacher_id = ?
         ");
         $stmt->execute([$asm_id, $teacher_id]);
-        echo json_encode($stmt->fetch(PDO::FETCH_ASSOC) ?: ['error' => 'Not found']);
-        exit;
-    }
-    if ($action === 'get_ocr_details' && isset($_GET['ocr_id'])) {
-        $ocr_id = (int)$_GET['ocr_id'];
-        $stmt = $pdo->prepare("SELECT * FROM ocr_results WHERE id = ?");
-        $stmt->execute([$ocr_id]);
         echo json_encode($stmt->fetch(PDO::FETCH_ASSOC) ?: ['error' => 'Not found']);
         exit;
     }
@@ -100,38 +127,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
     }
     if ($action === 'get_student_progress' && isset($_GET['student_id'])) {
         $student_id = (int)$_GET['student_id'];
-        // Fetch all assignments for this student (teacher must have access)
+        // Fetch assignments
         $stmt = $pdo->prepare("
-            SELECT a.*, 
-                   (SELECT COUNT(*) FROM ocr_results WHERE assignment_id = a.id) as total_pages,
-                   (SELECT COUNT(DISTINCT page_number) FROM ocr_results WHERE assignment_id = a.id) as unique_pages,
-                   (SELECT COUNT(*) FROM help_requests WHERE assignment_id = a.id AND status = 'pending') as pending_help
+            SELECT a.*, sk.file_path, sk.question_structure
             FROM assignments a
+            LEFT JOIN score_keys sk ON a.score_key_id = sk.id
             JOIN teacher_student ts ON a.student_id = ts.student_id
             WHERE a.student_id = ? AND ts.teacher_id = ?
         ");
         $stmt->execute([$student_id, $teacher_id]);
         $assignments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        // Also get help requests details with image paths if available
-        $help_stmt = $pdo->prepare("
-            SELECT hr.*, o.extracted_answer as student_answer, o.image_path
-            FROM help_requests hr
-            LEFT JOIN ocr_results o ON hr.assignment_id = o.assignment_id AND hr.question_number = o.question_number
-            WHERE hr.student_id = ? AND hr.status = 'pending'
+
+        // Fetch self-scores
+        $self_stmt = $pdo->prepare("
+            SELECT assignment_id, question_number, is_correct 
+            FROM self_scores 
+            WHERE student_id = ?
         ");
-        $help_stmt->execute([$student_id]);
-        $help_requests = $help_stmt->fetchAll(PDO::FETCH_ASSOC);
-        // Also get uploaded images per assignment (the first page image)
-        $image_stmt = $pdo->prepare("
-            SELECT DISTINCT assignment_id, image_path 
-            FROM ocr_results 
-            WHERE assignment_id IN (SELECT id FROM assignments WHERE student_id = ?)
-            AND image_path IS NOT NULL 
-            GROUP BY assignment_id
-        ");
-        $image_stmt->execute([$student_id]);
-        $images = $image_stmt->fetchAll(PDO::FETCH_ASSOC);
-        echo json_encode(['assignments' => $assignments, 'help_requests' => $help_requests, 'images' => $images]);
+        $self_stmt->execute([$student_id]);
+        $self_scores = $self_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        echo json_encode([
+            'assignments' => $assignments,
+            'self_scores' => $self_scores
+        ]);
         exit;
     }
 }
@@ -148,20 +167,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pace = trim($_POST['pace'] ?? '');
                 $score_key_id = (int)($_POST['score_key_id'] ?? 0);
                 $due_date = $_POST['due_date'] ?? '';
+                $expected_pages = (int)($_POST['expected_pages'] ?? 0);
                 if ($student_id <= 0 || $pace === '' || $score_key_id <= 0 || $due_date === '') {
                     throw new Exception('All assignment fields are required.');
                 }
                 $chk = $pdo->prepare("SELECT 1 FROM teacher_student WHERE teacher_id = ? AND student_id = ?");
                 $chk->execute([$teacher_id, $student_id]);
                 if (!$chk->fetch()) throw new Exception('Access Denied: Unassigned student reference.');
-                $stmt = $pdo->prepare("INSERT INTO assignments (student_id, pace, score_key_id, due_date, status) VALUES (?, ?, ?, ?, 'Assigned')");
-                $stmt->execute([$student_id, $pace, $score_key_id, $due_date]);
+                $stmt = $pdo->prepare("INSERT INTO assignments (student_id, pace, score_key_id, due_date, expected_pages, status) VALUES (?, ?, ?, ?, ?, 'Assigned')");
+                $stmt->execute([$student_id, $pace, $score_key_id, $due_date, $expected_pages]);
                 send_notification($student_id, $teacher_id, 'status_change', "New PACE assignment: $pace");
                 $notice = "PACE assignment registered successfully.";
             }
 
             if ($action === 'upload_score_key') {
                 $pace_title = trim($_POST['pace_title'] ?? '');
+                $key_type = $_POST['score_key_type'] ?? 'single';
+                $pace_start = (int)($_POST['pace_start'] ?? 0);
+                $pace_end = (int)($_POST['pace_end'] ?? 0);
                 if ($pace_title === '') throw new Exception('Please specify a destination PACE target.');
                 if (isset($_FILES['score_key_file']) && $_FILES['score_key_file']['error'] === 0) {
                     $fileName = $_FILES['score_key_file']['name'];
@@ -172,14 +195,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
                     move_uploaded_file($_FILES['score_key_file']['tmp_name'], $destPath);
 
-                    $extracted = gemini_extract_score_key($destPath);
-                    if (empty($extracted['questions'])) throw new Exception('Could not extract questions from document.');
-                    $question_structure = json_encode($extracted);
-                    $question_count = count($extracted['questions']);
-                    
-                    $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
-                    $stmt->execute([$pace_title, $destPath, $question_count, $question_structure]);
-                    $notice = "Document successfully parsed by Gemini AI. Draft version initialized.";
+                    if ($key_type === 'multiple') {
+                        if ($pace_start <= 0 || $pace_end < $pace_start) throw new Exception('Invalid PACE range.');
+                        $extractedArray = gemini_extract_multiple_score_keys($destPath);
+                        if (!$extractedArray || !is_array($extractedArray)) throw new Exception('Could not extract multiple keys from document.');
+                        $index = 0;
+                        foreach ($extractedArray as $pageData) {
+                            $paceNumber = $pace_start + $index;
+                            if ($paceNumber > $pace_end) break;
+                            $questions = $pageData['questions'] ?? [];
+                            if (empty($questions)) continue;
+                            $question_structure = json_encode(['pages' => [[
+                                'page_number' => $pageData['page_number'] ?? ($index+1),
+                                'questions' => $questions
+                            ]]]);
+                            $question_count = count($questions);
+                            $paceName = $pace_title . ' ' . $paceNumber;
+                            $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
+                            $stmt->execute([$paceName, $destPath, $question_count, $question_structure]);
+                            $index++;
+                        }
+                        $notice = "Multiple score keys created for PACEs $pace_start - $pace_end.";
+                    } else {
+                        // Single
+                        $extracted = gemini_extract_score_key($destPath);
+                        if (empty($extracted['pages']) && empty($extracted['questions'])) throw new Exception('Could not extract questions from document.');
+                        // Normalize: if there's a top-level 'questions' but no 'pages', wrap it
+                        if (!isset($extracted['pages']) && isset($extracted['questions'])) {
+                            $extracted['pages'] = [[
+                                'page_number' => 1,
+                                'questions' => $extracted['questions']
+                            ]];
+                        }
+                        $question_structure = json_encode(['pages' => $extracted['pages']]);
+                        $question_count = array_sum(array_map(function($p) { return count($p['questions']); }, $extracted['pages']));
+                        $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
+                        $stmt->execute([$pace_title, $destPath, $question_count, $question_structure]);
+                        $notice = "Document successfully parsed by Gemini AI. Draft version initialized.";
+                    }
                 } else {
                     throw new Exception('File upload token missing or corrupt.');
                 }
@@ -190,25 +243,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = $pdo->prepare("UPDATE score_keys SET is_published = 1, version = 'Prod-1.0' WHERE id = ?");
                 $stmt->execute([$sk_id]);
                 $notice = "Score key status transitioned to published.";
-            }
-
-            if ($action === 'process_ocr') {
-                $ocr_id = (int)($_POST['ocr_id'] ?? 0);
-                $review_status = $_POST['review_action'] ?? '';
-                $edited_val = trim($_POST['extracted_answer'] ?? '');
-                if ($review_status === 'Approve') {
-                    $stmt = $pdo->prepare("UPDATE ocr_results SET status = 'Approved', confidence = 1.00 WHERE id = ?");
-                    $stmt->execute([$ocr_id]);
-                } elseif ($review_status === 'Edit') {
-                    $stmt = $pdo->prepare("UPDATE ocr_results SET extracted_answer = ?, status = 'Approved', confidence = 1.00 WHERE id = ?");
-                    $stmt->execute([$edited_val, $ocr_id]);
-                } else {
-                    $stmt = $pdo->prepare("UPDATE ocr_results SET status = 'Rejected' WHERE id = ?");
-                    $stmt->execute([$ocr_id]);
-                }
-                if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-                    header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
-                }
             }
 
             if ($action === 'update_assignment_status') {
@@ -234,24 +268,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body) VALUES (?, ?, ?)");
                 $stmt->execute([$teacher_id, $student_id, $msg_body]);
                 send_notification($student_id, $teacher_id, 'message', "New message from teacher");
-                if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-                    header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
-                }
-            }
-
-            if ($action === 'answer_help') {
-                $help_id = (int)($_POST['help_id'] ?? 0);
-                $response = trim($_POST['response'] ?? '');
-                if ($help_id <= 0 || $response === '') throw new Exception('Invalid data.');
-                $stmt = $pdo->prepare("UPDATE help_requests SET status = 'answered', gemini_explanation = CONCAT(gemini_explanation, '\n\nTeacher Response: ', ?) WHERE id = ?");
-                $stmt->execute([$response, $help_id]);
-                // Notify student
-                $stmt = $pdo->prepare("SELECT student_id FROM help_requests WHERE id = ?");
-                $stmt->execute([$help_id]);
-                $hr = $stmt->fetch();
-                if ($hr) {
-                    send_notification($hr['student_id'], $teacher_id, 'help', "Your help request has been answered by the teacher.");
-                }
                 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
                     header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
                 }
@@ -299,15 +315,6 @@ foreach($all_assignments as $asm) {
 }
 
 $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
-$ocr_queue = $pdo->query("
-    SELECT o.*, u.full_name as student_name, a.pace 
-    FROM ocr_results o
-    JOIN assignments a ON o.assignment_id = a.id
-    JOIN users u ON a.student_id = u.id
-    WHERE o.status = 'Pending Review' OR o.confidence < 0.80
-    ORDER BY o.id DESC
-")->fetchAll(PDO::FETCH_ASSOC);
-$pending_ocr_count = count($ocr_queue);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -317,6 +324,7 @@ $pending_ocr_count = count($ocr_queue);
     <link rel="shortcut icon" href="../WCIS_LOGO-1-removebg-preview.png" type="image/x-icon">
     <title>Teacher Dashboard</title>
     <style>
+        /* same as before – unchanged */
         :root {
             --bg: #0b1020;
             --bg-soft: #11162b;
@@ -424,6 +432,7 @@ $pending_ocr_count = count($ocr_queue);
         .stat-box p { margin: 8px 0 0; font-size: 24px; font-weight: 700; color: var(--primary); }
         .notif-bell { position: relative; cursor: pointer; }
         .notif-badge { position: absolute; top: -8px; right: -8px; background: var(--danger); border-radius: 50%; padding: 2px 6px; font-size: 12px; display: none; }
+        .hidden { display: none; }
     </style>
 </head>
 <body>
@@ -456,7 +465,6 @@ $pending_ocr_count = count($ocr_queue);
         <div class="stats-grid">
             <div class="stat-box"><h4>Assigned Students</h4><p><?= $total_assigned_students ?></p></div>
             <div class="stat-box"><h4>Active Tasks</h4><p><?= $active_assignments_count ?></p></div>
-            <div class="stat-box"><h4>OCR Review Queue</h4><p><?= $pending_ocr_count ?></p></div>
             <div class="stat-box"><h4>Corrections Required</h4><p><?= $correction_queue_count ?></p></div>
         </div>
         <div class="toolbar"><h3 style="margin:0;">Assigned Students Roster</h3></div>
@@ -503,7 +511,7 @@ $pending_ocr_count = count($ocr_queue);
             </table>
         </div>
         <div class="toolbar">
-            <h3 style="margin:0;">Score Key Configuration & OCR Engine Manifest</h3>
+            <h3 style="margin:0;">Score Key Configuration & Engine Manifest</h3>
             <button class="btn btn--primary" onclick="openUploadKeyModal()">+ Upload Score Key Document</button>
         </div>
         <div class="table-wrap">
@@ -536,30 +544,6 @@ $pending_ocr_count = count($ocr_queue);
                 </tbody>
             </table>
         </div>
-        <div class="toolbar"><h3 style="margin:0;">OCR Review Verification Queue (Low Confidence Flags)</h3></div>
-        <div class="table-wrap">
-            <table class="table">
-                <thead><tr><th>ID</th><th>Student Base</th><th>Target Assignment Code</th><th>Machine Value Result</th><th>Confidence Threshold</th><th>Action</th></tr></thead>
-                <tbody>
-                <?php foreach ($ocr_queue as $oq): ?>
-                <tr>
-                    <td><?= $oq['id'] ?></td>
-                    <td><?= htmlspecialchars($oq['student_name']) ?></td>
-                    <td><?= htmlspecialchars($oq['pace']) ?></td>
-                    <td><code><?= htmlspecialchars($oq['extracted_answer']) ?></code></td>
-                    <td>
-                        <strong style="color: <?= $oq['confidence'] < 0.80 ? 'var(--danger)' : 'var(--success)' ?>">
-                        <?= number_format($oq['confidence'] * 100, 2) ?>%
-                        </strong>
-                    </td>
-                    <td><button class="btn btn--primary" onclick="openOcrReviewModal(<?= $oq['id'] ?>)">Audit</button></td>
-                </tr>
-                <?php endforeach; if(empty($ocr_queue)): ?>
-                <tr><td colspan="6" style="text-align:center; color:var(--muted);">No anomalies awaiting verification processing.</td></tr>
-                <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
     </div>
 </section>
 
@@ -586,6 +570,8 @@ $pending_ocr_count = count($ocr_queue);
                 </select>
                 <label class="label">Academic Deadline Milestone</label>
                 <input class="input" type="date" name="due_date" required>
+                <label class="label">Expected Number of Answer Pages (optional)</label>
+                <input class="input" type="number" name="expected_pages" min="0" value="0">
                 <button type="submit" class="btn btn--success" style="margin-top:12px">Register Assignment Parameters</button>
             </form>
         </div>
@@ -604,35 +590,25 @@ $pending_ocr_count = count($ocr_queue);
                 <input type="hidden" name="action" value="upload_score_key">
                 <label class="label">Target Subject Component (PACE Reference)</label>
                 <input class="input" name="pace_title" placeholder="e.g. Mathematics 1021" required>
+                <label class="label">Score Key Type</label>
+                <select class="select" name="score_key_type" id="score_key_type" onchange="togglePaceRange()">
+                    <option value="single">Single PACE</option>
+                    <option value="multiple">Multiple PACEs (Range)</option>
+                </select>
+                <div id="paceRangeFields" style="display:none; grid-template-columns:1fr 1fr; gap:12px;">
+                    <div>
+                        <label class="label">Start PACE Number</label>
+                        <input class="input" type="number" name="pace_start" id="pace_start" min="1" value="1000">
+                    </div>
+                    <div>
+                        <label class="label">End PACE Number</label>
+                        <input class="input" type="number" name="pace_end" id="pace_end" min="1" value="1005">
+                    </div>
+                </div>
                 <label class="label">Document Resource Package (Supported: PDF, PNG, JPG)</label>
                 <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required>
                 <p class="helper-text">Uploading initializes the engine pipeline to auto-generate answer matching structures automatically.</p>
                 <button type="submit" class="btn btn--primary" style="margin-top:12px">Engage Extraction Engine</button>
-            </form>
-        </div>
-    </div>
-</div>
-
-<div class="modal" id="ocrReviewModal">
-    <div class="modal__content">
-        <div class="modal__head">
-            <h3 class="modal__title">OCR Confidence Resolution Panel</h3>
-            <button class="btn btn--ghost" onclick="closeModal('ocrReviewModal')">✕</button>
-        </div>
-        <div class="modal__body">
-            <form id="ocrReviewForm" class="form">
-                <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
-                <input type="hidden" name="action" value="process_ocr">
-                <input type="hidden" name="ocr_id" id="review_ocr_id">
-                <label class="label">Engine Read Parsing Output</label>
-                <input class="input" name="extracted_answer" id="ocr_extracted_answer">
-                <label class="label">Review Action Selection</label>
-                <select class="select" name="review_action" id="ocr_review_action" required>
-                    <option value="Approve">Verify & Accept Confidence Readout</option>
-                    <option value="Edit">Apply Correction Override Entry</option>
-                    <option value="Reject">Invalidate Extraction: Force Re-scan Loop</option>
-                </select>
-                <button type="submit" class="btn btn--success" style="margin-top:12px">Commit Integrity Review Action</button>
             </form>
         </div>
     </div>
@@ -696,7 +672,6 @@ $pending_ocr_count = count($ocr_queue);
     </div>
 </div>
 
-<!-- Modal for student progress -->
 <div class="modal" id="progressModal">
     <div class="modal__content">
         <div class="modal__head">
@@ -713,30 +688,25 @@ $pending_ocr_count = count($ocr_queue);
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
+function togglePaceRange() {
+    let type = document.getElementById('score_key_type').value;
+    let rangeDiv = document.getElementById('paceRangeFields');
+    if (type === 'multiple') {
+        rangeDiv.style.display = 'grid';
+    } else {
+        rangeDiv.style.display = 'none';
+    }
+}
+
 function openPaceModal(studentId, name) {
     document.getElementById('pace_student_id').value = studentId;
     document.getElementById('paceModalTitle').innerText = "Assign PACE to " + name;
     openModal('paceModal');
 }
-function openUploadKeyModal() { openModal('uploadKeyModal'); }
-
-async function openOcrReviewModal(ocrId) {
-    let r = await fetch('?action=get_ocr_details&ocr_id=' + ocrId);
-    let data = await r.json();
-    if(!data.error) {
-        document.getElementById('review_ocr_id').value = ocrId;
-        document.getElementById('ocr_extracted_answer').value = data.extracted_answer;
-        openModal('ocrReviewModal');
-    }
+function openUploadKeyModal() {
+    openModal('uploadKeyModal');
+    togglePaceRange();
 }
-document.getElementById('ocrReviewForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    let d = new FormData(e.target);
-    let r = await fetch('', {method: 'POST', body: d, headers: {'X-Requested-With': 'XMLHttpRequest'}});
-    let res = await r.json();
-    if(res.status === 'success') location.reload();
-    else alert(res.message || 'Operation Failed');
-});
 
 async function openAssignmentViewer(asmId) {
     let r = await fetch('?action=get_assignment_details&assignment_id=' + asmId);
@@ -748,6 +718,7 @@ async function openAssignmentViewer(asmId) {
             <div><strong>Student Target:</strong> ${data.student_name}</div>
             <div><strong>Target PACE Code:</strong> ${data.pace}</div>
             <div><strong>Due Milestone:</strong> ${data.due_date}</div>
+            <div><strong>Expected Pages:</strong> ${data.expected_pages || 'Not set'}</div>
             <div><strong>Assigned System Map Vector:</strong> ${data.score_key_version || 'None Matrix Linked'}</div>
             <div><strong>Current Stage Status Badge:</strong> <span class="badge">${data.status}</span></div>
         `;
@@ -852,7 +823,7 @@ if ('Notification' in window) {
 setInterval(fetchNotifications, 10000);
 fetchNotifications();
 
-// Student progress view with images
+// Student progress view with self-scores
 async function viewStudentProgress(studentId, studentName) {
     document.getElementById('progressModalTitle').innerText = 'Progress for ' + studentName;
     let container = document.getElementById('progressContent');
@@ -864,55 +835,28 @@ async function viewStudentProgress(studentId, studentName) {
         return;
     }
     let html = '<div style="display:grid; gap:16px;">';
-    // Assignments
     html += '<h4 style="margin:0;">Assignments</h4>';
     if (data.assignments.length === 0) {
         html += '<div style="color:var(--muted);">No assignments found.</div>';
     } else {
-        html += '<div class="table-wrap"><table class="table"><thead><tr><th>PACE</th><th>Due</th><th>Status</th><th>Pages</th><th>Images</th></tr></thead><tbody>';
+        html += '<div class="table-wrap"><table class="table"><thead><tr><th>PACE</th><th>Due</th><th>Status</th><th>Self-Score</th></tr></thead><tbody>';
         data.assignments.forEach(a => {
-            // Find image for this assignment
-            let img = data.images ? data.images.find(i => i.assignment_id == a.id) : null;
-            let imgHtml = '';
-            if (img && img.image_path) {
-                imgHtml = `<a href="${img.image_path}" target="_blank"><img src="${img.image_path}" style="max-width:60px; max-height:60px; border-radius:4px;"></a>`;
-            } else {
-                imgHtml = 'No image';
-            }
+            let selfScores = data.self_scores ? data.self_scores.filter(s => s.assignment_id == a.id) : [];
+            let scoreCount = selfScores.length;
+            let correctCount = selfScores.filter(s => s.is_correct == 1).length;
+            let scoreDisplay = scoreCount > 0 ? `${correctCount}/${scoreCount}` : 'Not scored';
             html += `<tr>
                 <td>${a.pace}</td>
                 <td>${a.due_date}</td>
                 <td><span class="badge badge--${a.status.toLowerCase().replace(' ', '')}">${a.status}</span></td>
-                <td>${a.unique_pages || 0} (total ${a.total_pages || 0})</td>
-                <td>${imgHtml}</td>
+                <td>${scoreDisplay}</td>
             </tr>`;
         });
         html += '</tbody></table></div>';
     }
-    // Help requests
-        html += '</div>';
+    html += '</div>';
     container.innerHTML = html;
     openModal('progressModal');
-}
-
-async function answerHelp(event, helpId) {
-    event.preventDefault();
-    let form = event.target;
-    let response = form.querySelector('input[name="response"]').value.trim();
-    if (!response) { alert('Please enter a response.'); return; }
-    let d = new FormData();
-    d.append('csrf', '<?= csrf_token() ?>');
-    d.append('action', 'answer_help');
-    d.append('help_id', helpId);
-    d.append('response', response);
-    let r = await fetch('', {method: 'POST', body: d, headers: {'X-Requested-With': 'XMLHttpRequest'}});
-    let res = await r.json();
-    if (res.status === 'success') {
-        alert('Response sent successfully.');
-        location.reload();
-    } else {
-        alert(res.message || 'Error sending response.');
-    }
 }
 </script>
 </body>
