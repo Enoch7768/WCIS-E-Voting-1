@@ -2,7 +2,7 @@
 date_default_timezone_set('Africa/Nairobi');
 
 $host = 'localhost';
-$db   = 'wcis_portal_db';
+$db   = 'wcis-portal-db';
 $user = 'root';
 $pass = '';
 $charset = 'utf8mb4';
