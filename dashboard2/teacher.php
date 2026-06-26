@@ -211,7 +211,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                         $notice = "Multiple score keys created for PACEs $pace_start - $pace_end.";
                     } else {
-                        // Single
                         $extracted = gemini_extract_score_key($destPath);
                         if (empty($extracted['pages']) && empty($extracted['questions'])) throw new Exception('Could not extract questions from document.');
                         if (!isset($extracted['pages']) && isset($extracted['questions'])) {
@@ -257,9 +256,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($action === 'send_msg') {
                 $student_id = (int)($_POST['student_id'] ?? 0);
                 $msg_body = trim($_POST['message'] ?? '');
-                if ($student_id <= 0 || $msg_body === '') throw new Exception('Message content empty.');
-                $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body) VALUES (?, ?, ?)");
-                $stmt->execute([$teacher_id, $student_id, $msg_body]);
+                if ($student_id <= 0) throw new Exception('Invalid student.');
+
+                $attachment_path = null;
+                $attachment_name = null;
+                $attachment_mime = null;
+                if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] === UPLOAD_ERR_OK) {
+                    $file = $_FILES['attachment'];
+                    $maxSize = 5 * 1024 * 1024;
+                    if ($file['size'] > $maxSize) throw new Exception('File too large (max 5MB).');
+                    // Allow all file types – no MIME restriction
+                    $uploadDir = 'uploads/chat/';
+                    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+                    $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+                    $filename = uniqid('chat_', true) . '.' . $ext;
+                    $dest = $uploadDir . $filename;
+                    if (!move_uploaded_file($file['tmp_name'], $dest)) {
+                        throw new Exception('Failed to save file.');
+                    }
+                    $attachment_path = $dest;
+                    $attachment_name = $file['name'];
+                    $attachment_mime = $file['type'] ?: mime_content_type($dest);
+                }
+
+                if ($msg_body === '' && !$attachment_path) throw new Exception('Message or file required.');
+
+                $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body, attachment_path, attachment_name, attachment_mime) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$teacher_id, $student_id, $msg_body, $attachment_path, $attachment_name, $attachment_mime]);
                 send_notification($student_id, $teacher_id, 'message', "New message from teacher");
                 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
                     header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
@@ -612,12 +635,10 @@ body {
 		transform: scale(1);
 		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
 	}
-
 	50% {
 		transform: scale(1.03);
 		filter: drop-shadow(0 0 16px rgba(110, 139, 255, 0.6));
 	}
-
 	100% {
 		transform: scale(1);
 		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
@@ -687,7 +708,7 @@ body {
                 <div class="logo pulse"><img src="../WCIS_LOGO-1-removebg-preview.png" alt="WCIS Logo"></div>
                 <div>
                     <h1 class="card__title">Teacher Dashboard</h1>
-                    <p class="card__sub">Academic Workflow, OCR Extraction & Student Assignments</p>
+                    <p class="card__sub">Academic Workflow & Student Assignments</p>
                 </div>
             </div>
             <div style="display:flex; align-items:center; gap:12px;">
@@ -889,14 +910,18 @@ body {
         </div>
         <div class="modal__body" style="display:flex; flex-direction:column; gap:12px;">
             <div id="chatBoxContainer" style="height:220px; overflow-y:auto; background:#0f142a; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.06);"></div>
-            <form id="chatDispatchForm" class="form">
+            <form id="chatDispatchForm" class="form" enctype="multipart/form-data">
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="send_msg">
                 <input type="hidden" name="student_id" id="chat_student_id">
-                <div style="display:flex; gap:8px;">
-                    <input class="input" name="message" placeholder="Type text alert instruction..." required>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <input class="input" name="message" placeholder="Type a message..." style="flex:1; min-width:150px;">
+                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;">Attach File
+                        <input type="file" name="attachment" style="display:none;" onchange="this.form.querySelector('input[name=message]').placeholder='File attached'">
+                    </label>
                     <button type="submit" class="btn btn--primary">Send</button>
                 </div>
+                <div id="teacherRecordingStatus" style="font-size:12px; color:var(--muted); display:none;">🔴 Recording...</div>
             </form>
         </div>
     </div>
@@ -976,6 +1001,42 @@ document.getElementById('assignmentLifecycleForm').addEventListener('submit', as
     else alert(res.message || 'Operation Failed');
 });
 
+let teacherMediaRecorder;
+let teacherAudioChunks = [];
+
+document.getElementById('teacherVoiceRecordBtn').addEventListener('click', async function() {
+    const status = document.getElementById('teacherRecordingStatus');
+    if (teacherMediaRecorder && teacherMediaRecorder.state === 'recording') {
+        teacherMediaRecorder.stop();
+        this.textContent = '🎤';
+        status.style.display = 'none';
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        teacherMediaRecorder = new MediaRecorder(stream);
+        teacherAudioChunks = [];
+        teacherMediaRecorder.ondataavailable = event => teacherAudioChunks.push(event.data);
+        teacherMediaRecorder.onstop = () => {
+            const audioBlob = new Blob(teacherAudioChunks, { type: 'audio/webm' });
+            const file = new File([audioBlob], 'voice_message.webm', { type: 'audio/webm' });
+            const form = document.getElementById('chatDispatchForm');
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(file);
+            const fileInput = form.querySelector('input[name="attachment"]');
+            fileInput.files = dataTransfer.files;
+            form.querySelector('input[name="message"]').placeholder = 'Voice message attached';
+            stream.getTracks().forEach(track => track.stop());
+        };
+        teacherMediaRecorder.start();
+        this.textContent = '⏹️';
+        status.style.display = 'block';
+        status.textContent = '🔴 Recording...';
+    } catch (err) {
+        alert('Microphone access denied: ' + err.message);
+    }
+});
+
 async function openChatModal(studentId, studentName) {
     document.getElementById('chat_student_id').value = studentId;
     document.getElementById('chatModalTitle').innerText = "Direct Line: " + studentName;
@@ -989,24 +1050,40 @@ async function openChatModal(studentId, studentName) {
         let isMe = m.sender_id == <?= $teacher_id ?>;
         let alignment = isMe ? 'text-align:right;' : 'text-align:left;';
         let background = isMe ? 'rgba(110,139,255,0.1)' : 'rgba(255,255,255,0.04)';
+        let attachmentHtml = '';
+        if (m.attachment_path) {
+            const ext = m.attachment_path.split('.').pop().toLowerCase();
+            if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
+                attachmentHtml = `<div><img src="${m.attachment_path}" style="max-width:200px; max-height:150px; border-radius:8px;"></div>`;
+            } else if (['mp3','wav','ogg','webm'].includes(ext) || (m.attachment_mime && m.attachment_mime.startsWith('audio/'))) {
+                attachmentHtml = `<div><audio controls src="${m.attachment_path}" style="max-width:200px;"></audio></div>`;
+            } else {
+                attachmentHtml = `<div><a href="${m.attachment_path}" target="_blank" class="btn btn--ghost">📎 ${m.attachment_name || 'Attachment'}</a></div>`;
+            }
+        }
         markup += `<div style="${alignment} margin-bottom:8px;">
             <div style="display:inline-block; padding:8px 12px; background:${background}; border-radius:8px; max-width:80%; font-size:13px; text-align:left;">
-                ${m.body}
+                ${m.body || ''}
+                ${attachmentHtml}
             </div>
         </div>`;
     });
     box.innerHTML = markup || '<div style="color:var(--muted); font-size:12px; text-align:center;">No direct thread interaction logged.</div>';
 }
+
 document.getElementById('chatDispatchForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    let form = e.target;
-    let d = new FormData(form);
-    let sId = document.getElementById('chat_student_id').value;
-    let r = await fetch('', {method: 'POST', body: d, headers: {'X-Requested-With': 'XMLHttpRequest'}});
-    let res = await r.json();
-    if(res.status === 'success') {
+    const form = e.target;
+    const fd = new FormData(form);
+    const sId = document.getElementById('chat_student_id').value;
+    const r = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    const res = await r.json();
+    if (res.status === 'success') {
         form.querySelector('input[name="message"]').value = '';
-        openChatModal(sId, document.getElementById('chatModalTitle').innerText.replace("Direct Line: ", ""));
+        form.querySelector('input[name="attachment"]').value = '';
+        form.querySelector('input[name="message"]').placeholder = 'Type a message...';
+        const studentName = document.getElementById('chatModalTitle').innerText.replace("Direct Line: ", "");
+        openChatModal(sId, studentName);
     } else {
         alert(res.message || 'Transmission failed');
     }

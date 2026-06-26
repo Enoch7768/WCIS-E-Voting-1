@@ -114,10 +114,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$t_data) throw new Exception('No certified instructor linked.');
                 $teacher_id = $t_data['teacher_id'];
                 $msg_body = trim($_POST['message'] ?? '');
-                if ($msg_body === '') throw new Exception('Message cannot be blank.');
-                $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body) VALUES (?, ?, ?)");
-                $stmt->execute([$student_id, $teacher_id, $msg_body]);
-                send_notification($teacher_id, $student_id, 'message', "New message from student");
+
+                $attachment_path = null;
+                $attachment_name = null;
+                $attachment_mime = null;
+                if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] === UPLOAD_ERR_OK) {
+                    $file = $_FILES['attachment'];
+                    $maxSize = 5 * 1024 * 1024; // 5MB
+                    if ($file['size'] > $maxSize) throw new Exception('File too large (max 5MB).');
+                    // Allow all file types – no MIME restriction
+                    $uploadDir = 'uploads/chat/';
+                    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+                    $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
+                    $filename = uniqid('chat_', true) . '.' . $ext;
+                    $dest = $uploadDir . $filename;
+                    if (!move_uploaded_file($file['tmp_name'], $dest)) {
+                        throw new Exception('Failed to save file.');
+                    }
+                    $attachment_path = $dest;
+                    $attachment_name = $file['name'];
+                    $attachment_mime = $file['type'] ?: mime_content_type($dest);
+                }
+
+                if ($msg_body === '' && !$attachment_path) throw new Exception('Message or file required.');
+
+                $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body, attachment_path, attachment_name, attachment_mime) VALUES (?, ?, ?, ?, ?, ?)");
+                $stmt->execute([$student_id, $teacher_id, $msg_body, $attachment_path, $attachment_name, $attachment_mime]);
+
+                send_notification($teacher_id, $student_id, 'message', "New message from student with " . ($attachment_path ? 'attachment' : 'text'));
                 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
                     header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
                 }
@@ -463,12 +487,10 @@ body {
 		transform: scale(1);
 		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
 	}
-
 	50% {
 		transform: scale(1.03);
 		filter: drop-shadow(0 0 16px rgba(110, 139, 255, 0.6));
 	}
-
 	100% {
 		transform: scale(1);
 		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
@@ -562,7 +584,7 @@ body {
                 <div class="logo pulse"><img src="../WCIS_LOGO-1-removebg-preview.png" alt="WCIS Logo"></div>
                 <div>
                     <h1 class="card__title">Student Workstation</h1>
-                    <p class="card__sub">PACE Evaluation Engine, Automated Submissions & Progress Trackers</p>
+                    <p class="card__sub">Self-Scoring and Progress Tracking</p>
                 </div>
             </div>
             <div style="display:flex; align-items:center; gap:12px;">
@@ -651,13 +673,17 @@ body {
         </div>
         <div class="modal__body" style="display:flex; flex-direction:column; gap:12px;">
             <div id="chatMessagesContainer" style="height:240px; overflow-y:auto; background:#0f142a; padding:14px; border-radius:12px; border:1px solid rgba(255,255,255,0.06);"></div>
-            <form id="chatSubmissionForm" class="form">
+            <form id="chatSubmissionForm" class="form" enctype="multipart/form-data">
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="send_chat_msg">
-                <div style="display:flex; gap:8px;">
-                    <input class="input" name="message" placeholder="Type notification or flag issue..." required>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                    <input class="input" name="message" placeholder="Type a message..." style="flex:1; min-width:150px;">
+                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;">Attach File
+                        <input type="file" name="attachment" style="display:none;" onchange="this.form.querySelector('input[name=message]').placeholder='File attached'">
+                    </label>
                     <button type="submit" class="btn btn--primary">Send</button>
                 </div>
+                <div id="recordingStatus" style="font-size:12px; color:var(--muted); display:none;">🔴 Recording...</div>
             </form>
         </div>
     </div>
@@ -750,6 +776,42 @@ async function openSelfScoreModal(asmId) {
     openModal('selfScoreModal');
 }
 
+let mediaRecorder;
+let audioChunks = [];
+
+document.getElementById('voiceRecordBtn').addEventListener('click', async function() {
+    const status = document.getElementById('recordingStatus');
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        this.textContent = '🎤';
+        status.style.display = 'none';
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+        mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+        mediaRecorder.onstop = () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            const file = new File([audioBlob], 'voice_message.webm', { type: 'audio/webm' });
+            const form = document.getElementById('chatSubmissionForm');
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(file);
+            const fileInput = form.querySelector('input[name="attachment"]');
+            fileInput.files = dataTransfer.files;
+            form.querySelector('input[name="message"]').placeholder = 'Voice message attached';
+            stream.getTracks().forEach(track => track.stop());
+        };
+        mediaRecorder.start();
+        this.textContent = '⏹️';
+        status.style.display = 'block';
+        status.textContent = '🔴 Recording...';
+    } catch (err) {
+        alert('Microphone access denied: ' + err.message);
+    }
+});
+
 async function openChatModal() {
     openModal('chatModal');
     let container = document.getElementById('chatMessagesContainer');
@@ -761,10 +823,22 @@ async function openChatModal() {
         let isMe = m.sender_id == <?= $student_id ?>;
         let alignment = isMe ? 'text-align:right;' : 'text-align:left;';
         let background = isMe ? 'rgba(110,139,255,0.1)' : 'rgba(255,255,255,0.04)';
+        let attachmentHtml = '';
+        if (m.attachment_path) {
+            const ext = m.attachment_path.split('.').pop().toLowerCase();
+            if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
+                attachmentHtml = `<div><img src="${m.attachment_path}" style="max-width:200px; max-height:150px; border-radius:8px;"></div>`;
+            } else if (['mp3','wav','ogg','webm'].includes(ext) || (m.attachment_mime && m.attachment_mime.startsWith('audio/'))) {
+                attachmentHtml = `<div><audio controls src="${m.attachment_path}" style="max-width:200px;"></audio></div>`;
+            } else {
+                attachmentHtml = `<div><a href="${m.attachment_path}" target="_blank" class="btn btn--ghost">📎 ${m.attachment_name || 'Attachment'}</a></div>`;
+            }
+        }
         markup += `<div style="${alignment} margin-bottom:10px;">
             <div style="font-size:11px; color:var(--muted); margin-bottom:2px;">${m.sender_name}</div>
             <div style="display:inline-block; padding:8px 12px; background:${background}; border-radius:8px; max-width:80%; font-size:13px; text-align:left;">
-                ${m.body}
+                ${m.body || ''}
+                ${attachmentHtml}
             </div>
         </div>`;
     });
@@ -774,18 +848,20 @@ async function openChatModal() {
 
 document.getElementById('chatSubmissionForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    let f = e.target;
-    let d = new FormData(f);
-    let r = await fetch('', {method: 'POST', body: d, headers: {'X-Requested-With': 'XMLHttpRequest'}});
-    let res = await r.json();
-    if(res.status === 'success') {
+    const f = e.target;
+    const fd = new FormData(f);
+    const r = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    const res = await r.json();
+    if (res.status === 'success') {
         f.querySelector('input[name="message"]').value = '';
+        f.querySelector('input[name="attachment"]').value = '';
+        f.querySelector('input[name="message"]').placeholder = 'Type a message...';
         openChatModal();
     } else {
         alert(res.message || 'Transmission exception flagged');
     }
 });
-                
+
 let lastNotifCount = 0;
 
 async function fetchNotifications() {
