@@ -6,6 +6,44 @@ require '../includes/csrf.php';
 require '../includes/config.php';
 require_student();
 
+function log_error($message, $context = []) {
+    $logEntry = date('Y-m-d H:i:s') . " | " . $message;
+    if (!empty($context)) {
+        $logEntry .= " | " . json_encode($context);
+    }
+    error_log($logEntry . "\n", 3, __DIR__ . '/logs/student_errors.log');
+}
+
+function get_upload_error_message($errorCode) {
+    switch ($errorCode) {
+        case UPLOAD_ERR_INI_SIZE:   return 'File exceeds server upload limit.';
+        case UPLOAD_ERR_FORM_SIZE:  return 'File exceeds form limit.';
+        case UPLOAD_ERR_PARTIAL:    return 'File was only partially uploaded.';
+        case UPLOAD_ERR_NO_FILE:    return 'No file was selected.';
+        case UPLOAD_ERR_NO_TMP_DIR: return 'Temporary folder missing.';
+        case UPLOAD_ERR_CANT_WRITE: return 'Failed to write file to disk.';
+        case UPLOAD_ERR_EXTENSION:  return 'File upload stopped by extension.';
+        default: return 'Unknown upload error.';
+    }
+}
+
+set_exception_handler(function ($e) {
+    log_error('Uncaught exception', [
+        'message' => $e->getMessage(),
+        'file'    => $e->getFile(),
+        'line'    => $e->getLine(),
+        'trace'   => $e->getTraceAsString()
+    ]);
+    http_response_code(500);
+    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['status' => 'error', 'message' => 'Internal server error.']);
+    } else {
+        echo "<h1>Server Error</h1><p>Please try again later.</p>";
+    }
+    exit;
+});
+
 $student_id = $_SESSION['user_id'] ?? 0;
 $notice = null; $error = null;
 
@@ -27,9 +65,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
             JOIN users u ON ts.teacher_id = u.id
             LEFT JOIN score_keys sk ON a.score_key_id = sk.id
             WHERE a.id = ? AND a.student_id = ?
+            LIMIT 1
         ");
         $stmt->execute([$asm_id, $student_id]);
-        echo json_encode($stmt->fetch(PDO::FETCH_ASSOC) ?: ['error' => 'Data record inaccessible']);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$result) {
+            log_error('get_assignment_details not found', ['assignment_id' => $asm_id, 'student_id' => $student_id]);
+            echo json_encode(['error' => 'Assignment not found.']);
+        } else {
+            echo json_encode($result);
+        }
         exit;
     }
     if ($action === 'get_score_key_details' && isset($_GET['assignment_id'])) {
@@ -43,9 +88,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         $stmt->execute([$asm_id, $student_id]);
         $data = $stmt->fetch();
         if ($data && $data['question_structure']) {
+            $structure = json_decode($data['question_structure'], true);
             echo json_encode([
                 'file_path' => $data['file_path'],
-                'question_structure' => json_decode($data['question_structure'], true)
+                'question_structure' => $structure
             ]);
         } else {
             echo json_encode(['error' => 'Score key not available for this assignment.']);
@@ -53,14 +99,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         exit;
     }
     if ($action === 'get_chat_stream') {
+        $teacher_id = (int)($_GET['teacher_id'] ?? 0);
+        $t_stmt = $pdo->prepare("SELECT teacher_id FROM teacher_student WHERE student_id = ? AND teacher_id = ?");
+        $t_stmt->execute([$student_id, $teacher_id]);
+        if (!$t_stmt->fetch()) {
+            echo json_encode([]);
+            exit;
+        }
         $stmt = $pdo->prepare("
             SELECT m.*, u.full_name as sender_name 
             FROM messages m
             JOIN users u ON m.sender_id = u.id
-            WHERE (m.sender_id = ? OR m.receiver_id = ?)
+            WHERE (m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?)
             ORDER BY m.created_at ASC
         ");
-        $stmt->execute([$student_id, $student_id]);
+        $stmt->execute([$student_id, $teacher_id, $teacher_id, $student_id]);
         echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
         exit;
     }
@@ -81,7 +134,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_check($_POST['csrf'] ?? '')) {
-        $error = 'Invalid CSRF security signature token.';
+        $error = 'Invalid CSRF token.';
+        log_error('CSRF validation failed', ['ip' => $_SERVER['REMOTE_ADDR']]);
     } else {
         $action = $_POST['action'] ?? '';
         try {
@@ -108,11 +162,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             if ($action === 'send_chat_msg') {
-                $t_stmt = $pdo->prepare("SELECT teacher_id FROM teacher_student WHERE student_id = ? LIMIT 1");
-                $t_stmt->execute([$student_id]);
-                $t_data = $t_stmt->fetch();
-                if (!$t_data) throw new Exception('No certified instructor linked.');
-                $teacher_id = $t_data['teacher_id'];
+                $teacher_id = (int)($_POST['teacher_id'] ?? 0);
+                $t_stmt = $pdo->prepare("SELECT teacher_id FROM teacher_student WHERE student_id = ? AND teacher_id = ?");
+                $t_stmt->execute([$student_id, $teacher_id]);
+                if (!$t_stmt->fetch()) throw new Exception('Invalid or unlinked instructor.');
                 $msg_body = trim($_POST['message'] ?? '');
 
                 $attachment_path = null;
@@ -120,9 +173,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $attachment_mime = null;
                 if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] === UPLOAD_ERR_OK) {
                     $file = $_FILES['attachment'];
-                    $maxSize = 5 * 1024 * 1024; // 5MB
+                    $maxSize = 5 * 1024 * 1024;
                     if ($file['size'] > $maxSize) throw new Exception('File too large (max 5MB).');
-                    // Allow all file types – no MIME restriction
                     $uploadDir = 'uploads/chat/';
                     if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
                     $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
@@ -149,8 +201,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         } catch (Throwable $ex) {
             $error = $ex->getMessage();
+            log_error('POST action failed', [
+                'action' => $action,
+                'message' => $ex->getMessage(),
+                'file' => $ex->getFile(),
+                'line' => $ex->getLine()
+            ]);
             if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-                header('Content-Type: application/json'); echo json_encode(['status' => 'error', 'message' => $error]); exit;
+                header('Content-Type: application/json');
+                echo json_encode(['status' => 'error', 'message' => $error]);
+                exit;
             }
         }
     }
@@ -175,13 +235,16 @@ foreach ($my_assignments as $item) {
 }
 
 $teacher_stmt = $pdo->prepare("
-    SELECT u.full_name, u.email 
+    SELECT u.id, u.full_name, u.email 
     FROM users u
     JOIN teacher_student ts ON u.id = ts.teacher_id
-    WHERE ts.student_id = ? LIMIT 1
+    WHERE ts.student_id = ? ORDER BY u.full_name ASC
 ");
 $teacher_stmt->execute([$student_id]);
-$my_teacher = $teacher_stmt->fetch(PDO::FETCH_ASSOC) ?: ['full_name' => 'Unallocated Staff Node', 'email' => 'system@wcis.edu'];
+$my_teachers = $teacher_stmt->fetchAll(PDO::FETCH_ASSOC);
+if (empty($my_teachers)) {
+    $my_teachers = [['id' => 0, 'full_name' => 'Unallocated Staff Node', 'email' => 'system@wcis.edu']];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -606,19 +669,20 @@ body {
             <div class="stat-box"><h4>Assigned PACEs</h4><p><?= $total_assigned ?></p></div>
             <div class="stat-box"><h4>Active Modules</h4><p><?= $active_paces ?></p></div>
             <div class="stat-box"><h4>Completed Tasks</h4><p><?= $completed_paces ?></p></div>
-            <div class="stat-box"><h4>Correction Pipeline</h4><p><?= $requires_correction ?></p></div>
         </div>
-        <div class="toolbar" style="margin-top: 12px; padding: 14px; background: rgba(255,255,255,0.02); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); align-items: center;">
-            <div>
-                <h4 style="margin:0; font-size:14px; color: var(--text);">Assigned Primary Academic Instructor</h4>
-                <p style="margin:4px 0 0; font-size:13px; color: var(--muted);"><?= htmlspecialchars($my_teacher['full_name']) ?> — <code><?= htmlspecialchars($my_teacher['email']) ?></code></p>
+        <div class="toolbar" style="margin-top: 12px; padding: 14px; background: rgba(255,255,255,0.02); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); align-items: center; flex-direction:column; gap:10px;">
+            <h4 style="margin:0; align-self:flex-start; font-size:14px; color: var(--text);">Assigned Teacher<?= count($my_teachers) > 1 ? 's' : '' ?></h4>
+            <?php foreach ($my_teachers as $t): ?>
+            <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+                <p style="margin:0; font-size:13px; color: var(--muted);"><?= htmlspecialchars($t['full_name']) ?> — <code><?= htmlspecialchars($t['email']) ?></code></p>
+                <button class="btn btn--primary" onclick="openChatModal(<?= (int)$t['id'] ?>, '<?= htmlspecialchars($t['full_name'], ENT_QUOTES) ?>')">Open Chat</button>
             </div>
-            <button class="btn btn--primary" onclick="openChatModal()">Open Chat</button>
+            <?php endforeach; ?>
         </div>
         <div class="toolbar" style="margin-top:24px;"><h3 style="margin:0;">My Assigned PACE Modules</h3></div>
         <div class="table-wrap">
             <table class="table">
-                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Pipeline Evaluation Status</th><th>Actions</th></tr></thead>
+                <thead><tr><th>PACE Target</th><th>Due Deadline Date</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
                 <?php foreach ($my_assignments as $asm): ?>
                 <tr>
@@ -668,19 +732,21 @@ body {
 <div class="modal" id="chatModal">
     <div class="modal__content">
         <div class="modal__head">
-            <h3 class="modal__title">Chat</h3>
+            <h3 class="modal__title">Chat — <span id="chatWithName">Teacher</span></h3>
             <button class="btn btn--ghost" onclick="closeModal('chatModal')">✕</button>
         </div>
         <div class="modal__body" style="display:flex; flex-direction:column; gap:12px;">
             <div id="chatMessagesContainer" style="height:240px; overflow-y:auto; background:#0f142a; padding:14px; border-radius:12px; border:1px solid rgba(255,255,255,0.06);"></div>
-            <form id="chatSubmissionForm" class="form" enctype="multipart/form-data">
+            <form id="chatSubmissionForm" class="form" enctype="multipart/form-data" method="POST">
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="send_chat_msg">
+                <input type="hidden" name="teacher_id" id="chatTeacherId" value="">
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <input class="input" name="message" placeholder="Type a message..." style="flex:1; min-width:150px;">
-                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;">Attach File
+                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;"><img src="paper-clip.png" alt="Attach File" style="width:20px; height:20px; filter:invert(1);">    
                         <input type="file" name="attachment" style="display:none;" onchange="this.form.querySelector('input[name=message]').placeholder='File attached'">
                     </label>
+                    <button type="button" class="btn btn--ghost" id="voiceRecordBtn" style="padding:8px 12px;">🎤</button>
                     <button type="submit" class="btn btn--primary">Send</button>
                 </div>
                 <div id="recordingStatus" style="font-size:12px; color:var(--muted); display:none;">🔴 Recording...</div>
@@ -717,6 +783,8 @@ async function openAssignmentDetails(asmId) {
             <div><strong>Status:</strong> <span class="badge">${data.status}</span></div>
         `;
         openModal('assignmentModal');
+    } else {
+        alert(data.error);
     }
 }
 
@@ -726,7 +794,7 @@ async function openSelfScoreModal(asmId) {
     if (data.error) { alert(data.error); return; }
 
     let filePath = data.file_path;
-    let structure = data.question_structure;
+    let structure = data.question_structure || { pages: [] };
     let pages = structure.pages || [];
 
     let html = '<div style="margin-bottom:16px;">';
@@ -746,24 +814,15 @@ async function openSelfScoreModal(asmId) {
 
     html += '<form id="selfScoreForm">';
     html += '<input type="hidden" name="assignment_id" value="' + asmId + '">';
-    let hasQuestions = false;
-    pages.forEach(page => {
-        let pageNum = page.page_number || 1;
-        if (page.questions && page.questions.length) {
-            hasQuestions = true;
-            html += `<div class="page-section"><h4>Page ${pageNum}</h4>`;
-            html += '</div>';
-        }
-    });
+    html += '<input type="hidden" name="csrf" value="<?= csrf_token() ?>">';
+    html += '<input type="hidden" name="action" value="submit_self_score">';
 
     document.getElementById('selfScoreContent').innerHTML = html;
 
     document.getElementById('selfScoreForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         let fd = new FormData(e.target);
-        fd.append('action', 'submit_self_score');
-        fd.append('csrf', '<?= csrf_token() ?>');
-        let resp = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+        let resp = await fetch('', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
         let result = await resp.json();
         if (result.status === 'success') {
             alert('Self-score saved!');
@@ -812,11 +871,13 @@ document.getElementById('voiceRecordBtn').addEventListener('click', async functi
     }
 });
 
-async function openChatModal() {
+async function openChatModal(teacherId, teacherName) {
+    document.getElementById('chatTeacherId').value = teacherId;
+    document.getElementById('chatWithName').textContent = teacherName || 'Teacher';
     openModal('chatModal');
     let container = document.getElementById('chatMessagesContainer');
     container.innerHTML = 'Retrieving conversation logs...';
-    let r = await fetch('?action=get_chat_stream');
+    let r = await fetch('?action=get_chat_stream&teacher_id=' + encodeURIComponent(teacherId));
     let logs = await r.json();
     let markup = '';
     logs.forEach(m => {
@@ -850,13 +911,13 @@ document.getElementById('chatSubmissionForm').addEventListener('submit', async (
     e.preventDefault();
     const f = e.target;
     const fd = new FormData(f);
-    const r = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    const r = await fetch('', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
     const res = await r.json();
     if (res.status === 'success') {
         f.querySelector('input[name="message"]').value = '';
         f.querySelector('input[name="attachment"]').value = '';
         f.querySelector('input[name="message"]').placeholder = 'Type a message...';
-        openChatModal();
+        openChatModal(document.getElementById('chatTeacherId').value, document.getElementById('chatWithName').textContent);
     } else {
         alert(res.message || 'Transmission exception flagged');
     }

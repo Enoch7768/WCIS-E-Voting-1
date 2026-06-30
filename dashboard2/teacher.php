@@ -6,6 +6,48 @@ require '../includes/csrf.php';
 require '../includes/config.php';
 require_teacher();
 
+function log_error($message, $context = []) {
+    $logEntry = date('Y-m-d H:i:s') . " | " . $message;
+    if (!empty($context)) {
+        $logEntry .= " | " . json_encode($context);
+    }
+    $logDir = __DIR__ . '/logs';
+    if (!is_dir($logDir)) {
+        mkdir($logDir, 0755, true);
+    }
+    error_log($logEntry . "\n", 3, $logDir . '/teacher_errors.log');
+}
+
+function get_upload_error_message($errorCode) {
+    switch ($errorCode) {
+        case UPLOAD_ERR_INI_SIZE:   return 'File exceeds server upload limit.';
+        case UPLOAD_ERR_FORM_SIZE:  return 'File exceeds form limit.';
+        case UPLOAD_ERR_PARTIAL:    return 'File was only partially uploaded.';
+        case UPLOAD_ERR_NO_FILE:    return 'No file was selected.';
+        case UPLOAD_ERR_NO_TMP_DIR: return 'Temporary folder missing.';
+        case UPLOAD_ERR_CANT_WRITE: return 'Failed to write file to disk.';
+        case UPLOAD_ERR_EXTENSION:  return 'File upload stopped by extension.';
+        default: return 'Unknown upload error.';
+    }
+}
+
+set_exception_handler(function ($e) {
+    log_error('Uncaught exception', [
+        'message' => $e->getMessage(),
+        'file'    => $e->getFile(),
+        'line'    => $e->getLine(),
+        'trace'   => $e->getTraceAsString()
+    ]);
+    http_response_code(500);
+    if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
+        header('Content-Type: application/json');
+        echo json_encode(['status' => 'error', 'message' => 'Internal server error. Please try again later.']);
+    } else {
+        echo "<h1>Server Error</h1><p>An unexpected error occurred. Please contact support.</p>";
+    }
+    exit;
+});
+
 $teacher_id = $_SESSION['user_id'] ?? 0;
 $notice = null; $error = null;
 
@@ -13,71 +55,6 @@ function send_notification($user_id, $sender_id, $type, $message, $link = null) 
     global $pdo;
     $stmt = $pdo->prepare("INSERT INTO notifications (user_id, sender_id, type, message, link) VALUES (?, ?, ?, ?, ?)");
     $stmt->execute([$user_id, $sender_id, $type, $message, $link]);
-}
-
-function gemini_extract_score_key($file_path) {
-    $api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : (getenv('GEMINI_API_KEY') ?: '');
-    if (empty($api_key)) { error_log('Gemini API key not defined'); return null; }
-    $image_data = base64_encode(file_get_contents($file_path));
-    $mime = mime_content_type($file_path);
-    $prompt = "Extract the answer key from this exam document. Return a JSON object with the following structure:
-{
-  \"pace\": { \"subject\": \"string\", \"pace_number\": \"string\", \"title\": \"string\" },
-  \"version\": 1,
-  \"pages\": [
-    {
-      \"page_number\": 1,
-      \"questions\": [
-        { \"question_number\": \"1\", \"question_type\": \"multiple_choice|fill_blank\", \"correct_answer\": \"A\", \"acceptable_answers\": [\"A\"], \"points\": 1 }
-      ]
-    }
-  ]
-}
-Only return valid JSON.";
-    $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
-    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    if ($http_code !== 200) throw new Exception("Gemini API error: $response");
-    $data = json_decode($response, true);
-    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    preg_match('/\{.*\}/s', $text, $matches);
-    $json = $matches[0] ?? '{}';
-    return json_decode($json, true);
-}
-
-function gemini_extract_multiple_score_keys($file_path) {
-    $api_key = defined('GEMINI_API_KEY') ? GEMINI_API_KEY : (getenv('GEMINI_API_KEY') ?: '');
-    if (empty($api_key)) { error_log('Gemini API key not defined'); return null; }
-    $image_data = base64_encode(file_get_contents($file_path));
-    $mime = mime_content_type($file_path);
-    $prompt = "This document contains answer keys for multiple PACE numbers, each on a separate page. Extract the answer key for each page. Return a JSON array where each element has:
-{
-  \"page_number\": integer,
-  \"pace\": { \"subject\": \"string\", \"pace_number\": \"string\", \"title\": \"string\" },
-  \"questions\": [ { \"question_number\": \"1\", \"correct_answer\": \"A\" } ]
-}
-Only return valid JSON array.";
-    $payload = ['contents' => [[ 'parts' => [ ['text' => $prompt], ['inline_data' => ['mime_type' => $mime, 'data' => $image_data]] ] ]]];
-    $ch = curl_init("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=" . $api_key);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
-    if ($http_code !== 200) throw new Exception("Gemini API error: $response");
-    $data = json_decode($response, true);
-    $text = $data['candidates'][0]['content']['parts'][0]['text'] ?? '';
-    preg_match('/\[.*\]/s', $text, $matches);
-    $json = $matches[0] ?? '[]';
-    return json_decode($json, true);
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
@@ -94,7 +71,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
             WHERE a.id = ? AND ts.teacher_id = ?
         ");
         $stmt->execute([$asm_id, $teacher_id]);
-        echo json_encode($stmt->fetch(PDO::FETCH_ASSOC) ?: ['error' => 'Not found']);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$result) {
+            log_error('AJAX get_assignment_details: not found', ['assignment_id' => $asm_id, 'teacher_id' => $teacher_id]);
+            echo json_encode(['error' => 'Not found or access denied.']);
+        } else {
+            echo json_encode($result);
+        }
+        exit;
+    }
+    if ($action === 'get_assignment_for_edit' && isset($_GET['assignment_id'])) {
+        $asm_id = (int)$_GET['assignment_id'];
+        $stmt = $pdo->prepare("
+            SELECT a.*
+            FROM assignments a
+            JOIN teacher_student ts ON a.student_id = ts.student_id
+            WHERE a.id = ? AND ts.teacher_id = ?
+        ");
+        $stmt->execute([$asm_id, $teacher_id]);
+        $result = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$result) {
+            log_error('AJAX get_assignment_for_edit: not found', ['assignment_id' => $asm_id, 'teacher_id' => $teacher_id]);
+            echo json_encode(['error' => 'Not found or access denied.']);
+        } else {
+            echo json_encode($result);
+        }
         exit;
     }
     if ($action === 'get_chat' && isset($_GET['student_id'])) {
@@ -107,7 +108,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
             ORDER BY m.created_at ASC
         ");
         $stmt->execute([$teacher_id, $student_id, $student_id, $teacher_id]);
-        echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
+        $messages = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (empty($messages)) {
+            log_error('AJAX get_chat: no messages', ['teacher_id' => $teacher_id, 'student_id' => $student_id]);
+        }
+        echo json_encode($messages);
         exit;
     }
     if ($action === 'get_notifications') {
@@ -123,36 +128,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         echo json_encode(['status' => 'ok']);
         exit;
     }
-    if ($action === 'get_student_progress' && isset($_GET['student_id'])) {
-        $student_id = (int)$_GET['student_id'];
-        $stmt = $pdo->prepare("
-            SELECT a.*, sk.file_path, sk.question_structure
-            FROM assignments a
-            LEFT JOIN score_keys sk ON a.score_key_id = sk.id
-            JOIN teacher_student ts ON a.student_id = ts.student_id
-            WHERE a.student_id = ? AND ts.teacher_id = ?
-        ");
-        $stmt->execute([$student_id, $teacher_id]);
-        $assignments = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        $self_stmt = $pdo->prepare("
-            SELECT assignment_id, question_number, is_correct 
-            FROM self_scores 
-            WHERE student_id = ?
-        ");
-        $self_stmt->execute([$student_id]);
-        $self_scores = $self_stmt->fetchAll(PDO::FETCH_ASSOC);
-
-        echo json_encode([
-            'assignments' => $assignments,
-            'self_scores' => $self_scores
-        ]);
-        exit;
-    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!csrf_check($_POST['csrf'] ?? '')) {
         $error = 'Invalid CSRF token.';
+        log_error('CSRF validation failed', ['ip' => $_SERVER['REMOTE_ADDR']]);
     } else {
         $action = $_POST['action'] ?? '';
         try {
@@ -162,86 +143,197 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $score_key_id = (int)($_POST['score_key_id'] ?? 0);
                 $due_date = $_POST['due_date'] ?? '';
                 $expected_pages = (int)($_POST['expected_pages'] ?? 0);
+
                 if ($student_id <= 0 || $pace === '' || $score_key_id <= 0 || $due_date === '') {
                     throw new Exception('All assignment fields are required.');
                 }
+                if (!preg_match('/^[A-Za-z0-9\-_ ]+$/', $pace)) {
+                    throw new Exception('PACE code contains invalid characters.');
+                }
+                if (!strtotime($due_date)) {
+                    throw new Exception('Invalid due date format.');
+                }
+                if ($expected_pages < 0) {
+                    throw new Exception('Expected pages cannot be negative.');
+                }
+
                 $chk = $pdo->prepare("SELECT 1 FROM teacher_student WHERE teacher_id = ? AND student_id = ?");
                 $chk->execute([$teacher_id, $student_id]);
                 if (!$chk->fetch()) throw new Exception('Access Denied: Unassigned student reference.');
-                $stmt = $pdo->prepare("INSERT INTO assignments (student_id, pace, score_key_id, due_date, expected_pages, status) VALUES (?, ?, ?, ?, ?, 'Assigned')");
-                $stmt->execute([$student_id, $pace, $score_key_id, $due_date, $expected_pages]);
+
+                try {
+                    $stmt = $pdo->prepare("INSERT INTO assignments (student_id, pace, score_key_id, due_date, expected_pages, status) VALUES (?, ?, ?, ?, ?, 'Assigned')");
+                    $stmt->execute([$student_id, $pace, $score_key_id, $due_date, $expected_pages]);
+                } catch (PDOException $e) {
+                    log_error('assign_pace DB error', ['student_id' => $student_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while saving assignment.');
+                }
+
                 send_notification($student_id, $teacher_id, 'status_change', "New PACE assignment: $pace");
                 $notice = "PACE assignment registered successfully.";
             }
 
+            if ($action === 'update_assignment') {
+                $asm_id = (int)($_POST['assignment_id'] ?? 0);
+                $pace = trim($_POST['pace'] ?? '');
+                $score_key_id = (int)($_POST['score_key_id'] ?? 0);
+                $due_date = $_POST['due_date'] ?? '';
+                $expected_pages = (int)($_POST['expected_pages'] ?? 0);
+                $status = $_POST['status'] ?? 'Assigned';
+
+                if ($asm_id <= 0 || $pace === '' || $score_key_id <= 0 || $due_date === '') {
+                    throw new Exception('All fields are required.');
+                }
+                if (!preg_match('/^[A-Za-z0-9\-_ ]+$/', $pace)) {
+                    throw new Exception('PACE contains invalid characters.');
+                }
+                if (!strtotime($due_date)) {
+                    throw new Exception('Invalid due date.');
+                }
+                if ($expected_pages < 0) {
+                    throw new Exception('Expected pages cannot be negative.');
+                }
+                $allowedStatus = ['Assigned','In Progress','Needs Correction','Completed','Self-Scored'];
+                if (!in_array($status, $allowedStatus, true)) {
+                    throw new Exception('Invalid status value.');
+                }
+
+                $chk = $pdo->prepare("
+                    SELECT a.id FROM assignments a
+                    JOIN teacher_student ts ON a.student_id = ts.student_id
+                    WHERE a.id = ? AND ts.teacher_id = ?
+                ");
+                $chk->execute([$asm_id, $teacher_id]);
+                if (!$chk->fetch()) throw new Exception('Access Denied: Not your assignment.');
+
+                try {
+                    $stmt = $pdo->prepare("UPDATE assignments SET pace = ?, score_key_id = ?, due_date = ?, expected_pages = ?, status = ? WHERE id = ?");
+                    $stmt->execute([$pace, $score_key_id, $due_date, $expected_pages, $status, $asm_id]);
+                } catch (PDOException $e) {
+                    log_error('update_assignment DB error', ['asm_id' => $asm_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while updating assignment.');
+                }
+
+                $stud = $pdo->prepare("SELECT student_id FROM assignments WHERE id = ?");
+                $stud->execute([$asm_id]);
+                $student = $stud->fetch();
+                if ($student) {
+                    send_notification($student['student_id'], $teacher_id, 'status_change', "Assignment updated: $pace");
+                }
+                $notice = "Assignment updated successfully.";
+            }
+
             if ($action === 'upload_score_key') {
                 $pace_title = trim($_POST['pace_title'] ?? '');
-                $key_type = $_POST['score_key_type'] ?? 'single';
-                $pace_start = (int)($_POST['pace_start'] ?? 0);
-                $pace_end = (int)($_POST['pace_end'] ?? 0);
                 if ($pace_title === '') throw new Exception('Please specify a destination PACE target.');
-                if (isset($_FILES['score_key_file']) && $_FILES['score_key_file']['error'] === 0) {
-                    $fileName = $_FILES['score_key_file']['name'];
-                    $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
-                    $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
-                    if (!in_array($ext, $allowed, true)) throw new Exception('Invalid score key document format.');
-                    if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
-                    $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
-                    move_uploaded_file($_FILES['score_key_file']['tmp_name'], $destPath);
 
-                    if ($key_type === 'multiple') {
-                        if ($pace_start <= 0 || $pace_end < $pace_start) throw new Exception('Invalid PACE range.');
-                        $extractedArray = gemini_extract_multiple_score_keys($destPath);
-                        if (!$extractedArray || !is_array($extractedArray)) throw new Exception('Could not extract multiple keys from document.');
-                        $index = 0;
-                        foreach ($extractedArray as $pageData) {
-                            $paceNumber = $pace_start + $index;
-                            if ($paceNumber > $pace_end) break;
-                            $questions = $pageData['questions'] ?? [];
-                            if (empty($questions)) continue;
-                            $question_structure = json_encode(['pages' => [[
-                                'page_number' => $pageData['page_number'] ?? ($index+1),
-                                'questions' => $questions
-                            ]]]);
-                            $question_count = count($questions);
-                            $paceName = $pace_title . ' ' . $paceNumber;
-                            $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
-                            $stmt->execute([$paceName, $destPath, $question_count, $question_structure]);
-                            $index++;
-                        }
-                        $notice = "Multiple score keys created for PACEs $pace_start - $pace_end.";
-                    } else {
-                        $extracted = gemini_extract_score_key($destPath);
-                        if (empty($extracted['pages']) && empty($extracted['questions'])) throw new Exception('Could not extract questions from document.');
-                        if (!isset($extracted['pages']) && isset($extracted['questions'])) {
-                            $extracted['pages'] = [[
-                                'page_number' => 1,
-                                'questions' => $extracted['questions']
-                            ]];
-                        }
-                        $question_structure = json_encode(['pages' => $extracted['pages']]);
-                        $question_count = array_sum(array_map(function($p) { return count($p['questions']); }, $extracted['pages']));
-                        $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
-                        $stmt->execute([$pace_title, $destPath, $question_count, $question_structure]);
-                        $notice = "Document successfully parsed by Gemini AI. Draft version initialized.";
-                    }
-                } else {
-                    throw new Exception('File upload token missing or corrupt.');
+                if (!isset($_FILES['score_key_file'])) {
+                    throw new Exception('No file uploaded.');
                 }
+                if ($_FILES['score_key_file']['error'] !== UPLOAD_ERR_OK) {
+                    $errorCode = $_FILES['score_key_file']['error'];
+                    throw new Exception('File upload failed: ' . get_upload_error_message($errorCode));
+                }
+
+                $file = $_FILES['score_key_file'];
+                $maxSize = 40 * 1024 * 1024;
+                if ($file['size'] > $maxSize) {
+                    throw new Exception('File size exceeds 40 MB limit.');
+                }
+
+                $fileName = $file['name'];
+                $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
+                $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
+                if (!in_array($ext, $allowed, true)) {
+                    throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
+                }
+
+                if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
+                $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
+                if (!move_uploaded_file($file['tmp_name'], $destPath)) {
+                    throw new Exception('Failed to move uploaded file.');
+                }
+
+                $question_structure = [];
+                $question_count = 0;
+                try {
+                    $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
+                    $stmt->execute([$pace_title, $destPath, $question_count, json_encode($question_structure)]);
+                } catch (PDOException $e) {
+                    log_error('upload_score_key DB error', ['pace' => $pace_title, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while saving score key.');
+                }
+                $notice = "Score key uploaded successfully.";
+            }
+
+            if ($action === 'reupload_score_key') {
+                $sk_id = (int)($_POST['score_key_id'] ?? 0);
+                $new_pace_title = trim($_POST['pace_title'] ?? '');
+                if ($sk_id <= 0 || $new_pace_title === '') throw new Exception('Missing score key ID or new PACE title.');
+
+                if (!isset($_FILES['score_key_file']) || $_FILES['score_key_file']['error'] !== UPLOAD_ERR_OK) {
+                    $errorCode = $_FILES['score_key_file']['error'] ?? UPLOAD_ERR_NO_FILE;
+                    throw new Exception('File upload failed: ' . get_upload_error_message($errorCode));
+                }
+
+                $file = $_FILES['score_key_file'];
+                $maxSize = 40 * 1024 * 1024;
+                if ($file['size'] > $maxSize) {
+                    throw new Exception('File size exceeds 40 MB limit.');
+                }
+
+                $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+                $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
+                if (!in_array($ext, $allowed, true)) {
+                    throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
+                }
+
+                if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
+                $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
+                if (!move_uploaded_file($file['tmp_name'], $destPath)) {
+                    throw new Exception('Failed to move uploaded file.');
+                }
+
+                $question_structure = [];
+                $question_count = 0;
+                try {
+                    $stmt = $pdo->prepare("UPDATE score_keys SET pace = ?, file_path = ?, version = 'Draft-1.0', is_published = 0, question_count = ?, question_structure = ? WHERE id = ?");
+                    $stmt->execute([$new_pace_title, $destPath, $question_count, json_encode($question_structure), $sk_id]);
+                } catch (PDOException $e) {
+                    log_error('reupload_score_key DB error', ['sk_id' => $sk_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while updating score key.');
+                }
+                $notice = "Score key re‑uploaded successfully.";
             }
 
             if ($action === 'publish_score_key') {
                 $sk_id = (int)($_POST['score_key_id'] ?? 0);
-                $stmt = $pdo->prepare("UPDATE score_keys SET is_published = 1, version = 'Prod-1.0' WHERE id = ?");
-                $stmt->execute([$sk_id]);
+                if ($sk_id <= 0) throw new Exception('Invalid score key ID.');
+                try {
+                    $stmt = $pdo->prepare("UPDATE score_keys SET is_published = 1, version = 'Prod-1.0' WHERE id = ?");
+                    $stmt->execute([$sk_id]);
+                } catch (PDOException $e) {
+                    log_error('publish_score_key DB error', ['sk_id' => $sk_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while publishing score key.');
+                }
                 $notice = "Score key status transitioned to published.";
             }
 
             if ($action === 'update_assignment_status') {
                 $asm_id = (int)($_POST['assignment_id'] ?? 0);
                 $target_status = $_POST['status'] ?? '';
-                $stmt = $pdo->prepare("UPDATE assignments SET status = ? WHERE id = ?");
-                $stmt->execute([$target_status, $asm_id]);
+                $allowedStatus = ['In Progress', 'Needs Correction', 'Completed'];
+                if (!in_array($target_status, $allowedStatus, true)) {
+                    throw new Exception('Invalid status value.');
+                }
+                try {
+                    $stmt = $pdo->prepare("UPDATE assignments SET status = ? WHERE id = ?");
+                    $stmt->execute([$target_status, $asm_id]);
+                } catch (PDOException $e) {
+                    log_error('update_assignment_status DB error', ['asm_id' => $asm_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while updating status.');
+                }
+
                 $student_stmt = $pdo->prepare("SELECT student_id FROM assignments WHERE id = ?");
                 $student_stmt->execute([$asm_id]);
                 $student = $student_stmt->fetch();
@@ -265,7 +357,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $file = $_FILES['attachment'];
                     $maxSize = 5 * 1024 * 1024;
                     if ($file['size'] > $maxSize) throw new Exception('File too large (max 5MB).');
-                    // Allow all file types – no MIME restriction
                     $uploadDir = 'uploads/chat/';
                     if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
                     $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
@@ -281,8 +372,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if ($msg_body === '' && !$attachment_path) throw new Exception('Message or file required.');
 
-                $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body, attachment_path, attachment_name, attachment_mime) VALUES (?, ?, ?, ?, ?, ?)");
-                $stmt->execute([$teacher_id, $student_id, $msg_body, $attachment_path, $attachment_name, $attachment_mime]);
+                try {
+                    $stmt = $pdo->prepare("INSERT INTO messages (sender_id, receiver_id, body, attachment_path, attachment_name, attachment_mime) VALUES (?, ?, ?, ?, ?, ?)");
+                    $stmt->execute([$teacher_id, $student_id, $msg_body, $attachment_path, $attachment_name, $attachment_mime]);
+                } catch (PDOException $e) {
+                    log_error('send_msg DB error', ['student_id' => $student_id, 'error' => $e->getMessage()]);
+                    throw new Exception('Database error while sending message.');
+                }
+
                 send_notification($student_id, $teacher_id, 'message', "New message from teacher");
                 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
                     header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
@@ -291,8 +388,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         } catch (Throwable $ex) {
             $error = $ex->getMessage();
+            log_error('POST action failed', [
+                'action' => $action,
+                'message' => $ex->getMessage(),
+                'file' => $ex->getFile(),
+                'line' => $ex->getLine()
+            ]);
             if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
-                header('Content-Type: application/json'); echo json_encode(['status' => 'error', 'message' => $error]); exit;
+                header('Content-Type: application/json');
+                echo json_encode(['status' => 'error', 'message' => $error]);
+                exit;
             }
         }
     }
@@ -708,7 +813,7 @@ body {
                 <div class="logo pulse"><img src="../WCIS_LOGO-1-removebg-preview.png" alt="WCIS Logo"></div>
                 <div>
                     <h1 class="card__title">Teacher Dashboard</h1>
-                    <p class="card__sub">Academic Workflow & Student Assignments</p>
+                    <p class="card__sub">Academic Workflow, OCR Extraction & Student Assignments</p>
                 </div>
             </div>
             <div style="display:flex; align-items:center; gap:12px;">
@@ -745,7 +850,6 @@ body {
                     <td>
                         <button class="btn btn--primary" onclick="openPaceModal(<?= $st['id'] ?>, '<?= htmlspecialchars($st['full_name'], ENT_QUOTES) ?>')">Assign PACE</button>
                         <button class="btn btn--ghost" onclick="openChatModal(<?= $st['id'] ?>, '<?= htmlspecialchars($st['full_name'], ENT_QUOTES) ?>')">Message</button>
-                        <button class="btn btn--ghost" onclick="viewStudentProgress(<?= $st['id'] ?>, '<?= htmlspecialchars($st['full_name'], ENT_QUOTES) ?>')">Progress</button>
                     </td>
                 </tr>
                 <?php endforeach; if(empty($assigned_students)): ?>
@@ -766,7 +870,10 @@ body {
                     <td><?= htmlspecialchars($asm['pace']) ?></td>
                     <td><?= htmlspecialchars($asm['due_date']) ?></td>
                     <td><span class="badge badge--<?= strtolower(str_replace(' ', '', $asm['status'])) ?>"><?= $asm['status'] ?></span></td>
-                    <td><button class="btn btn--ghost" onclick="openAssignmentViewer(<?= $asm['id'] ?>)">Review</button></td>
+                    <td>
+                        <button class="btn btn--ghost" onclick="openAssignmentViewer(<?= $asm['id'] ?>)">Review</button>
+                        <button class="btn btn--ghost" onclick="openEditAssignmentModal(<?= $asm['id'] ?>)">Edit</button>
+                    </td>
                 </tr>
                 <?php endforeach; if(empty($all_assignments)): ?>
                 <tr><td colspan="6" style="text-align:center; color:var(--muted);">No active curriculum assignments mapped.</td></tr>
@@ -780,15 +887,12 @@ body {
         </div>
         <div class="table-wrap">
             <table class="table">
-                <thead><tr><th>ID</th><th>PACE Target</th><th>Version Token</th><th>Extracted Key Questions</th><th>State</th><th>Action</th></tr></thead>
+                <thead><tr><th>ID</th><th>Score Key Name</th><th>Action</th></tr></thead>
                 <tbody>
                 <?php foreach ($score_keys as $sk): ?>
                 <tr>
                     <td><?= $sk['id'] ?></td>
                     <td><?= htmlspecialchars($sk['pace']) ?></td>
-                    <td><code><?= htmlspecialchars($sk['version']) ?></code></td>
-                    <td><?= $sk['question_count'] ?> steps verified</td>
-                    <td><?= $sk['is_published'] ? '✅ Immutable' : '🛠️ Draft Review Pending' ?></td>
                     <td>
                         <?php if(!$sk['is_published']): ?>
                         <form method="POST" style="margin:0; display:inline;">
@@ -797,9 +901,8 @@ body {
                             <input type="hidden" name="score_key_id" value="<?= $sk['id'] ?>">
                             <button type="submit" class="btn btn--success">Approve & Publish</button>
                         </form>
-                        <?php else: ?>
-                        <button class="btn btn--ghost" disabled>Locked</button>
                         <?php endif; ?>
+                        <button class="btn btn--ghost" onclick="openReuploadKeyModal(<?= $sk['id'] ?>, '<?= htmlspecialchars($sk['pace'], ENT_QUOTES) ?>')">Edit</button>
                     </td>
                 </tr>
                 <?php endforeach; if(empty($score_keys)): ?>
@@ -841,10 +944,48 @@ body {
     </div>
 </div>
 
+<div class="modal" id="editAssignmentModal">
+    <div class="modal__content">
+        <div class="modal__head">
+            <h3 class="modal__title">Edit Assignment</h3>
+            <button class="btn btn--ghost" onclick="closeModal('editAssignmentModal')">✕</button>
+        </div>
+        <div class="modal__body">
+            <form method="POST" class="form" id="editAssignmentForm">
+                <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
+                <input type="hidden" name="action" value="update_assignment">
+                <input type="hidden" name="assignment_id" id="edit_asm_id">
+                <label class="label">PACE Name</label>
+                <input class="input" name="pace" id="edit_pace" required>
+                <label class="label">Score Key</label>
+                <select class="select" name="score_key_id" id="edit_score_key_id" required>
+                    <option value="">-- Select Score Key --</option>
+                    <?php foreach($score_keys as $key): if($key['is_published']): ?>
+                    <option value="<?= $key['id'] ?>"><?= htmlspecialchars($key['pace']) ?> (<?= htmlspecialchars($key['version']) ?>)</option>
+                    <?php endif; endforeach; ?>
+                </select>
+                <label class="label">Due Date</label>
+                <input class="input" type="date" name="due_date" id="edit_due_date" required>
+                <label class="label">Expected Pages</label>
+                <input class="input" type="number" name="expected_pages" id="edit_expected_pages" min="0">
+                <label class="label">Status</label>
+                <select class="select" name="status" id="edit_status">
+                    <option value="Assigned">Assigned</option>
+                    <option value="In Progress">In Progress</option>
+                    <option value="Needs Correction">Needs Correction</option>
+                    <option value="Completed">Completed</option>
+                    <option value="Self-Scored">Self-Scored</option>
+                </select>
+                <button type="submit" class="btn btn--success" style="margin-top:12px">Update Assignment</button>
+            </form>
+        </div>
+    </div>
+</div>
+
 <div class="modal" id="uploadKeyModal">
     <div class="modal__content">
         <div class="modal__head">
-            <h3 class="modal__title">Process Original Source Score Key</h3>
+            <h3 class="modal__title">Upload Score Key Document</h3>
             <button class="btn btn--ghost" onclick="closeModal('uploadKeyModal')">✕</button>
         </div>
         <div class="modal__body">
@@ -853,25 +994,31 @@ body {
                 <input type="hidden" name="action" value="upload_score_key">
                 <label class="label">PACE Title</label>
                 <input class="input" name="pace_title" placeholder="e.g. Mathematics 1021" required>
-                <label class="label">Score Key Type</label>
-                <select class="select" name="score_key_type" id="score_key_type" onchange="togglePaceRange()">
-                    <option value="single">Single PACE</option>
-                    <option value="multiple">Multiple PACEs (Range)</option>
-                </select>
-                <div id="paceRangeFields" style="display:none; grid-template-columns:1fr 1fr; gap:12px;">
-                    <div>
-                        <label class="label">Start PACE Number</label>
-                        <input class="input" type="number" name="pace_start" id="pace_start" min="1" value="1000">
-                    </div>
-                    <div>
-                        <label class="label">End PACE Number</label>
-                        <input class="input" type="number" name="pace_end" id="pace_end" min="1" value="1005">
-                    </div>
-                </div>
                 <label class="label">Score Key (Supported: PDF, PNG, JPG)</label>
-                <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required>
-                <p class="helper-text">Uploading initializes the engine pipeline to auto-generate answer matching structures automatically.</p>
-                <button type="submit" class="btn btn--primary" style="margin-top:12px">Engage Extraction Engine</button>
+                <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required multiple>
+                <button type="submit" class="btn btn--primary" style="margin-top:12px">Upload Score Key</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="modal" id="reuploadKeyModal">
+    <div class="modal__content">
+        <div class="modal__head">
+            <h3 class="modal__title">Re‑upload Score Key</h3>
+            <button class="btn btn--ghost" onclick="closeModal('reuploadKeyModal')">✕</button>
+        </div>
+        <div class="modal__body">
+            <form method="POST" enctype="multipart/form-data" class="form">
+                <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
+                <input type="hidden" name="action" value="reupload_score_key">
+                <input type="hidden" name="score_key_id" id="reupload_sk_id">
+                <label class="label">PACE Title</label>
+                <input class="input" name="pace_title" id="reupload_pace_title" placeholder="e.g. Mathematics 1021" required>
+                <label class="label">New Score Key File (PDF, PNG, JPG)</label>
+                <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required multiple>
+                <p class="helper-text">Uploading will replace the existing file.</p>
+                <button type="submit" class="btn btn--primary" style="margin-top:12px">Re‑upload </button>
             </form>
         </div>
     </div>
@@ -910,15 +1057,16 @@ body {
         </div>
         <div class="modal__body" style="display:flex; flex-direction:column; gap:12px;">
             <div id="chatBoxContainer" style="height:220px; overflow-y:auto; background:#0f142a; padding:12px; border-radius:12px; border:1px solid rgba(255,255,255,0.06);"></div>
-            <form id="chatDispatchForm" class="form" enctype="multipart/form-data">
+            <form id="chatDispatchForm" class="form" enctype="multipart/form-data" method="POST">
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="send_msg">
                 <input type="hidden" name="student_id" id="chat_student_id">
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <input class="input" name="message" placeholder="Type a message..." style="flex:1; min-width:150px;">
-                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;">Attach File
+                    <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;"><img src="paper-clip.png" style="width:16px; height:16px; vertical-align:middle;">
                         <input type="file" name="attachment" style="display:none;" onchange="this.form.querySelector('input[name=message]').placeholder='File attached'">
                     </label>
+                    <button type="button" class="btn btn--ghost" id="teacherVoiceRecordBtn" style="padding:8px 12px;">🎤</button>
                     <button type="submit" class="btn btn--primary">Send</button>
                 </div>
                 <div id="teacherRecordingStatus" style="font-size:12px; color:var(--muted); display:none;">🔴 Recording...</div>
@@ -939,31 +1087,9 @@ body {
     </div>
 </div>
 
-<div class="modal" id="progressModal">
-    <div class="modal__content">
-        <div class="modal__head">
-            <h3 class="modal__title" id="progressModalTitle">Student Progress</h3>
-            <button class="btn btn--ghost" onclick="closeModal('progressModal')">✕</button>
-        </div>
-        <div class="modal__body">
-            <div id="progressContent"></div>
-        </div>
-    </div>
-</div>
-
 <script>
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
-
-function togglePaceRange() {
-    let type = document.getElementById('score_key_type').value;
-    let rangeDiv = document.getElementById('paceRangeFields');
-    if (type === 'multiple') {
-        rangeDiv.style.display = 'grid';
-    } else {
-        rangeDiv.style.display = 'none';
-    }
-}
 
 function openPaceModal(studentId, name) {
     document.getElementById('pace_student_id').value = studentId;
@@ -972,8 +1098,34 @@ function openPaceModal(studentId, name) {
 }
 function openUploadKeyModal() {
     openModal('uploadKeyModal');
-    togglePaceRange();
 }
+
+function openReuploadKeyModal(skId, currentPace) {
+    document.getElementById('reupload_sk_id').value = skId;
+    document.getElementById('reupload_pace_title').value = currentPace;
+    openModal('reuploadKeyModal');
+}
+
+async function openEditAssignmentModal(asmId) {
+    let r = await fetch('?action=get_assignment_for_edit&assignment_id=' + asmId);
+    let data = await r.json();
+    if (data.error) { alert(data.error); return; }
+    document.getElementById('edit_asm_id').value = asmId;
+    document.getElementById('edit_pace').value = data.pace || '';
+    document.getElementById('edit_score_key_id').value = data.score_key_id || '';
+    document.getElementById('edit_due_date').value = data.due_date || '';
+    document.getElementById('edit_expected_pages').value = data.expected_pages || 0;
+    document.getElementById('edit_status').value = data.status || 'Assigned';
+    openModal('editAssignmentModal');
+}
+document.getElementById('editAssignmentForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    let fd = new FormData(e.target);
+    let r = await fetch('', {method: 'POST', body: fd, headers: {'X-Requested-With': 'XMLHttpRequest'}});
+    let res = await r.json();
+    if (res.status === 'success') { location.reload(); }
+    else { alert(res.message || 'Update failed'); }
+});
 
 async function openAssignmentViewer(asmId) {
     let r = await fetch('?action=get_assignment_details&assignment_id=' + asmId);
@@ -983,11 +1135,10 @@ async function openAssignmentViewer(asmId) {
         let container = document.getElementById('assignmentDetailsContent');
         container.innerHTML = `
             <div><strong>Student Target:</strong> ${data.student_name}</div>
-            <div><strong>Target PACE Code:</strong> ${data.pace}</div>
+            <div><strong>PACE Name:</strong> ${data.pace}</div>
             <div><strong>Due Milestone:</strong> ${data.due_date}</div>
-            <div><strong>Expected Pages:</strong> ${data.expected_pages || 'Not set'}</div>
-            <div><strong>Score Key Version:</strong> ${data.score_key_version || 'No Score Key Attached'}</div>
-            <div><strong>Current Stage Status Badge:</strong> <span class="badge">${data.status}</span></div>
+            <div><strong>Score Key:</strong> ${data.score_key_version || 'No Score Key Attached'}</div>
+            <div><strong>Current Status:</strong> <span class="badge">${data.status}</span></div>
         `;
         openModal('assignmentViewModal');
     }
@@ -1039,8 +1190,9 @@ document.getElementById('teacherVoiceRecordBtn').addEventListener('click', async
 
 async function openChatModal(studentId, studentName) {
     document.getElementById('chat_student_id').value = studentId;
-    document.getElementById('chatModalTitle').innerText = "Direct Line: " + studentName;
-    openModal('chatModal');
+    document.getElementById('chatModalTitle').innerText = "Chat: " + studentName;
+    openModal('chatModal');                       
+
     let box = document.getElementById('chatBoxContainer');
     box.innerHTML = 'Loading conversations thread...';
     let r = await fetch('?action=get_chat&student_id=' + studentId);
@@ -1053,12 +1205,16 @@ async function openChatModal(studentId, studentName) {
         let attachmentHtml = '';
         if (m.attachment_path) {
             const ext = m.attachment_path.split('.').pop().toLowerCase();
+            const fileName = m.attachment_name || 'download';
+            let downloadLink = `<a href="${m.attachment_path}" download="${fileName}" class="btn btn--ghost" style="margin-top:4px;">Download</a>`;
             if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
-                attachmentHtml = `<div><img src="${m.attachment_path}" style="max-width:200px; max-height:150px; border-radius:8px;"></div>`;
+                attachmentHtml = `<div><img src="${m.attachment_path}" style="max-width:200px; max-height:150px; border-radius:8px;"></div>
+                                  <div>${downloadLink}</div>`;
             } else if (['mp3','wav','ogg','webm'].includes(ext) || (m.attachment_mime && m.attachment_mime.startsWith('audio/'))) {
-                attachmentHtml = `<div><audio controls src="${m.attachment_path}" style="max-width:200px;"></audio></div>`;
+                attachmentHtml = `<div><audio controls src="${m.attachment_path}" style="max-width:200px;"></audio></div>
+                                  <div>${downloadLink}</div>`;
             } else {
-                attachmentHtml = `<div><a href="${m.attachment_path}" target="_blank" class="btn btn--ghost">📎 ${m.attachment_name || 'Attachment'}</a></div>`;
+                attachmentHtml = `<div><a href="${m.attachment_path}" download="${fileName}" class="btn btn--ghost">📎 ${fileName}</a></div>`;
             }
         }
         markup += `<div style="${alignment} margin-bottom:8px;">
@@ -1069,6 +1225,11 @@ async function openChatModal(studentId, studentName) {
         </div>`;
     });
     box.innerHTML = markup || '<div style="color:var(--muted); font-size:12px; text-align:center;">No direct thread interaction logged.</div>';
+
+    void box.offsetHeight;                          
+    requestAnimationFrame(() => {
+        box.scrollTop = box.scrollHeight;
+    });
 }
 
 document.getElementById('chatDispatchForm').addEventListener('submit', async (e) => {
@@ -1082,7 +1243,7 @@ document.getElementById('chatDispatchForm').addEventListener('submit', async (e)
         form.querySelector('input[name="message"]').value = '';
         form.querySelector('input[name="attachment"]').value = '';
         form.querySelector('input[name="message"]').placeholder = 'Type a message...';
-        const studentName = document.getElementById('chatModalTitle').innerText.replace("Direct Line: ", "");
+        const studentName = document.getElementById('chatModalTitle').innerText.replace("Chat: ", "");
         openChatModal(sId, studentName);
     } else {
         alert(res.message || 'Transmission failed');
@@ -1140,41 +1301,18 @@ if ('Notification' in window) {
 }
 setInterval(fetchNotifications, 10000);
 fetchNotifications();
+document.querySelector('input[name="score_key_file"]').addEventListener('change', function() {
+    const files = this.files;
+    const maxSize = 40 * 1024 * 1024; 
 
-async function viewStudentProgress(studentId, studentName) {
-    document.getElementById('progressModalTitle').innerText = 'Progress for ' + studentName;
-    let container = document.getElementById('progressContent');
-    container.innerHTML = 'Loading...';
-    let r = await fetch('?action=get_student_progress&student_id=' + studentId);
-    let data = await r.json();
-    if (data.error) {
-        container.innerHTML = '<div style="color:var(--danger);">Error loading progress.</div>';
-        return;
+    for (let i = 0; i < files.length; i++) {
+        if (files[i].size > maxSize) {
+            alert(`The file "${files[i].name}" is too large. Max file size is 40 MB.`);
+            this.value = ""; 
+            break;
+        }
     }
-    let html = '<div style="display:grid; gap:16px;">';
-    html += '<h4 style="margin:0;">Assignments</h4>';
-    if (data.assignments.length === 0) {
-        html += '<div style="color:var(--muted);">No assignments found.</div>';
-    } else {
-        html += '<div class="table-wrap"><table class="table"><thead><tr><th>PACE</th><th>Due</th><th>Status</th><th>Self-Score</th></tr></thead><tbody>';
-        data.assignments.forEach(a => {
-            let selfScores = data.self_scores ? data.self_scores.filter(s => s.assignment_id == a.id) : [];
-            let scoreCount = selfScores.length;
-            let correctCount = selfScores.filter(s => s.is_correct == 1).length;
-            let scoreDisplay = scoreCount > 0 ? `${correctCount}/${scoreCount}` : 'Not scored';
-            html += `<tr>
-                <td>${a.pace}</td>
-                <td>${a.due_date}</td>
-                <td><span class="badge badge--${a.status.toLowerCase().replace(' ', '')}">${a.status}</span></td>
-                <td>${scoreDisplay}</td>
-            </tr>`;
-        });
-        html += '</tbody></table></div>';
-    }
-    html += '</div>';
-    container.innerHTML = html;
-    openModal('progressModal');
-}
+});
 </script>
 </body>
 </html>

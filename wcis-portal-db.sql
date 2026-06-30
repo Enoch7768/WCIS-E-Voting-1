@@ -3,13 +3,13 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Jun 25, 2026 at 08:24 PM
+-- Generation Time: Jun 30, 2026 at 09:59 AM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
 START TRANSACTION;
-SET time_zone = "+00:00";
+SET time_zone = "+03:00";
 
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
@@ -44,7 +44,8 @@ CREATE TABLE `assignments` (
 
 INSERT INTO `assignments` (`id`, `student_id`, `pace`, `score_key_id`, `due_date`, `status`, `created_at`, `expected_pages`) VALUES
 (1, 3, 'Math', 1, '1111-11-11', 'Completed', '2026-06-17 17:59:48', 0),
-(2, 3, 'Test', 1, '2026-06-25', 'Assigned', '2026-06-25 18:15:54', 0);
+(2, 3, 'Test', 1, '2026-06-25', 'In Progress', '2026-06-25 18:15:54', 0),
+(3, 3, 'Mathm', 4, '2026-07-12', 'In Progress', '2026-06-28 13:16:06', 0);
 
 -- --------------------------------------------------------
 
@@ -98,22 +99,53 @@ CREATE TABLE `messages` (
   `sender_id` int(10) UNSIGNED NOT NULL,
   `receiver_id` int(10) UNSIGNED NOT NULL,
   `body` text NOT NULL,
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `attachment_path` varchar(255) DEFAULT NULL,
+  `attachment_name` varchar(255) DEFAULT NULL,
+  `attachment_mime` varchar(100) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
 -- Dumping data for table `messages`
 --
 
-INSERT INTO `messages` (`id`, `sender_id`, `receiver_id`, `body`, `created_at`) VALUES
-(1, 2, 3, 'Good Afternoon', '2026-06-17 08:33:05'),
-(2, 3, 2, 'Testing 123!!@@##', '2026-06-17 08:39:40'),
-(3, 3, 2, 'hi', '2026-06-17 09:00:01'),
-(4, 3, 2, 'IVE Failed I need help', '2026-06-17 09:07:19'),
-(5, 2, 3, 'ok', '2026-06-17 09:08:13'),
-(6, 2, 3, 'upload page', '2026-06-17 09:08:26'),
-(7, 3, 2, 'Testing', '2026-06-17 09:16:21'),
-(8, 3, 2, 'IVE Failed I need help', '2026-06-17 09:25:18');
+INSERT INTO `messages` (`id`, `sender_id`, `receiver_id`, `body`, `created_at`, `attachment_path`, `attachment_name`, `attachment_mime`) VALUES
+(1, 2, 3, 'Good Afternoon', '2026-06-17 08:33:05', NULL, NULL, NULL),
+(2, 3, 2, 'Testing 123!!@@##', '2026-06-17 08:39:40', NULL, NULL, NULL),
+(3, 3, 2, 'hi', '2026-06-17 09:00:01', NULL, NULL, NULL),
+(4, 3, 2, 'IVE Failed I need help', '2026-06-17 09:07:19', NULL, NULL, NULL),
+(5, 2, 3, 'ok', '2026-06-17 09:08:13', NULL, NULL, NULL),
+(6, 2, 3, 'upload page', '2026-06-17 09:08:26', NULL, NULL, NULL),
+(7, 3, 2, 'Testing', '2026-06-17 09:16:21', NULL, NULL, NULL),
+(8, 3, 2, 'IVE Failed I need help', '2026-06-17 09:25:18', NULL, NULL, NULL),
+(9, 3, 2, '', '2026-06-26 16:17:47', 'uploads/chat/chat_6a3ea62bd3f699.72969241.jpeg', 'WhatsApp Image 2026-06-24 at 8.41.28 PM.jpeg', 'image/jpeg'),
+(10, 2, 3, '', '2026-06-26 16:21:56', 'uploads/chat/chat_6a3ea724569b75.41069563.webm', 'voice_message.webm', 'audio/webm'),
+(11, 3, 2, '', '2026-06-26 16:33:09', 'uploads/chat/chat_6a3ea9c5566758.07609291.sql', 'wcis-portal-db.sql', 'application/octet-stream'),
+(12, 2, 3, 'hi', '2026-06-27 15:38:28', NULL, NULL, NULL),
+(13, 2, 3, 'testing', '2026-06-27 15:38:37', NULL, NULL, NULL),
+(14, 2, 3, '', '2026-06-27 15:38:54', 'uploads/chat/chat_6a3fee8ef2d570.97569459.png', 'Screenshot (5).png', 'image/png'),
+(15, 2, 3, 'testing', '2026-06-27 15:41:32', NULL, NULL, NULL),
+(16, 2, 3, '', '2026-06-27 15:42:48', 'uploads/chat/chat_6a3fef78ce39a8.75157062.mp3', '01_He_Arose_SpotiDost.mp3', 'audio/mpeg'),
+(17, 2, 3, '', '2026-06-27 16:03:58', 'uploads/chat/chat_6a3ff46e2a5c14.06686647.mp3', '01_He_Arose_SpotiDost.mp3', 'audio/mpeg'),
+(18, 2, 3, '', '2026-06-27 16:05:43', 'uploads/chat/chat_6a3ff4d73ce416.42720085.mp3', '01_He_Arose_SpotiDost.mp3', 'audio/mpeg'),
+(19, 2, 3, 'test', '2026-06-28 12:35:39', NULL, NULL, NULL),
+(20, 2, 3, 'test', '2026-06-28 12:35:55', NULL, NULL, NULL),
+(21, 2, 3, 'test', '2026-06-28 12:36:05', NULL, NULL, NULL),
+(22, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:36:25', NULL, NULL, NULL),
+(23, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:42:30', NULL, NULL, NULL),
+(24, 2, 3, 'tez', '2026-06-28 12:42:36', NULL, NULL, NULL),
+(25, 2, 3, '', '2026-06-28 12:43:05', 'uploads/chat/chat_6a4116d9c84b11.43948903.webm', 'voice_message.webm', 'audio/webm'),
+(26, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:45:32', NULL, NULL, NULL),
+(27, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:46:26', NULL, NULL, NULL),
+(28, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:48:17', NULL, NULL, NULL),
+(29, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:48:23', NULL, NULL, NULL),
+(30, 2, 3, 'Testing 123!!@@##', '2026-06-28 12:49:44', NULL, NULL, NULL),
+(31, 2, 3, 'IVE Failed I need help', '2026-06-28 12:49:52', NULL, NULL, NULL),
+(32, 3, 2, '', '2026-06-28 13:24:29', 'uploads/chat/chat_6a41208dda64f1.39344498.webm', 'voice_message.webm', 'audio/webm'),
+(33, 3, 2, '', '2026-06-28 13:24:45', 'uploads/chat/chat_6a41209d02c6e4.84395873.php', 'student.php', 'application/octet-stream'),
+(34, 3, 2, 'bb', '2026-06-30 07:16:50', NULL, NULL, NULL),
+(35, 4, 3, 'Hi', '2026-06-30 07:42:18', NULL, NULL, NULL),
+(36, 4, 3, 'Im your second teacher', '2026-06-30 07:42:28', NULL, NULL, NULL);
 
 -- --------------------------------------------------------
 
@@ -153,7 +185,60 @@ INSERT INTO `notifications` (`id`, `user_id`, `sender_id`, `type`, `message`, `l
 (14, 2, 3, 'submission', 'Student submitted assignment #1 (1 pages)', NULL, 1, '2026-06-17 18:01:39'),
 (15, 3, 2, 'status_change', 'Assignment status updated to: Needs Correction', NULL, 1, '2026-06-17 18:02:34'),
 (16, 3, 2, 'status_change', 'Assignment status updated to: Completed', NULL, 1, '2026-06-17 18:02:37'),
-(17, 3, 2, 'status_change', 'New PACE assignment: Test', NULL, 1, '2026-06-25 18:15:54');
+(17, 3, 2, 'status_change', 'New PACE assignment: Test', NULL, 1, '2026-06-25 18:15:54'),
+(18, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-26 16:17:47'),
+(19, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-26 16:21:56'),
+(20, 3, 2, 'status_change', 'Assignment status updated to: Completed', NULL, 1, '2026-06-26 16:22:34'),
+(21, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-26 16:33:09'),
+(22, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 15:38:28'),
+(23, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 15:38:37'),
+(24, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 15:38:55'),
+(25, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 15:41:32'),
+(26, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 15:42:48'),
+(27, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 16:03:58'),
+(28, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-27 16:05:43'),
+(29, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:35:39'),
+(30, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:35:55'),
+(31, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:36:05'),
+(32, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:36:25'),
+(33, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:42:30'),
+(34, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:42:36'),
+(35, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:43:05'),
+(36, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:45:32'),
+(37, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:46:26'),
+(38, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:48:17'),
+(39, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:48:23'),
+(40, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:49:44'),
+(41, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-28 12:49:52'),
+(42, 3, 2, 'status_change', 'New PACE assignment: Math', NULL, 1, '2026-06-28 13:16:06'),
+(43, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:00'),
+(44, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:01'),
+(45, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:02'),
+(46, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:02'),
+(47, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:03'),
+(48, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:03'),
+(49, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:03'),
+(50, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:03'),
+(51, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:08'),
+(52, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:09'),
+(53, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:14'),
+(54, 3, 2, 'status_change', 'Assignment updated: Math', NULL, 1, '2026-06-28 13:17:15'),
+(55, 3, 2, 'status_change', 'Assignment updated: Mathm', NULL, 1, '2026-06-28 13:17:18'),
+(56, 3, 2, 'status_change', 'Assignment updated: Mathm', NULL, 1, '2026-06-28 13:17:18'),
+(57, 3, 2, 'status_change', 'Assignment updated: Mathm', NULL, 1, '2026-06-28 13:19:27'),
+(58, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:19:33'),
+(59, 3, 2, 'status_change', 'Assignment updated: Mathm', NULL, 1, '2026-06-28 13:20:16'),
+(60, 3, 2, 'status_change', 'Assignment updated: Mathm', NULL, 1, '2026-06-28 13:20:16'),
+(61, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-28 13:24:29'),
+(62, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-28 13:24:45'),
+(63, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:24'),
+(64, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:25'),
+(65, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:25'),
+(66, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:25'),
+(67, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:25'),
+(68, 2, 3, 'message', 'New message from student with text', NULL, 1, '2026-06-30 07:16:50'),
+(69, 3, 4, 'message', 'New message from teacher', NULL, 1, '2026-06-30 07:42:18'),
+(70, 3, 4, 'message', 'New message from teacher', NULL, 1, '2026-06-30 07:42:28');
 
 -- --------------------------------------------------------
 
@@ -255,7 +340,7 @@ CREATE TABLE `score_keys` (
   `version` varchar(50) NOT NULL DEFAULT 'Draft-1.0',
   `is_published` tinyint(1) NOT NULL DEFAULT 0,
   `question_count` int(10) UNSIGNED NOT NULL DEFAULT 0,
-  `question_structure` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `question_structure` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`question_structure`)),
   `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
   `expected_pages` int(11) DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
@@ -265,7 +350,10 @@ CREATE TABLE `score_keys` (
 --
 
 INSERT INTO `score_keys` (`id`, `pace`, `file_path`, `version`, `is_published`, `question_count`, `question_structure`, `created_at`, `expected_pages`) VALUES
-(1, 'Math', 'uploads/score_keys/sk_6a32e07c883d69.64577606.pdf', 'Prod-1.0', 1, 26, '{\"pace\":{\"subject\":\"Mathematics\",\"pace_number\":\"Comprehensive Mid-Term\",\"title\":\"Math Answer Key\"},\"version\":1,\"questions\":[{\"question_number\":\"1\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"2\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"3\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"4\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"5\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"6\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"7\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"8\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"9\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"10\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"11\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":5},{\"question_number\":\"12\",\"question_type\":\"fill_blank\",\"correct_answer\":\"y = -8\",\"acceptable_answers\":[\"y = -8\"],\"points\":5},{\"question_number\":\"13\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(5, 3)\",\"acceptable_answers\":[\"(5, 3)\"],\"points\":5},{\"question_number\":\"14\",\"question_type\":\"fill_blank\",\"correct_answer\":\"4x^2 - 12x + 9\",\"acceptable_answers\":[\"4x^2 - 12x + 9\"],\"points\":5},{\"question_number\":\"15\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(x-2)(x-3)\",\"acceptable_answers\":[\"(x-2)(x-3)\"],\"points\":5},{\"question_number\":\"16\",\"question_type\":\"fill_blank\",\"correct_answer\":\"30\",\"acceptable_answers\":[\"30\"],\"points\":5},{\"question_number\":\"17\",\"question_type\":\"fill_blank\",\"correct_answer\":\"26\",\"acceptable_answers\":[\"26\"],\"points\":5},{\"question_number\":\"18\",\"question_type\":\"fill_blank\",\"correct_answer\":\"14\\u03c0\",\"acceptable_answers\":[\"14\\u03c0\"],\"points\":5},{\"question_number\":\"19\",\"question_type\":\"fill_blank\",\"correct_answer\":\"15\",\"acceptable_answers\":[\"15\"],\"points\":5},{\"question_number\":\"20\",\"question_type\":\"fill_blank\",\"correct_answer\":\"45\\u03c0\",\"acceptable_answers\":[\"45\\u03c0\"],\"points\":5},{\"question_number\":\"21\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x^5\",\"acceptable_answers\":[\"x^5\"],\"points\":2},{\"question_number\":\"22\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 9\",\"acceptable_answers\":[\"x = 9\"],\"points\":2},{\"question_number\":\"23\",\"question_type\":\"fill_blank\",\"correct_answer\":\"6\",\"acceptable_answers\":[\"6\"],\"points\":2},{\"question_number\":\"24\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\",\"acceptable_answers\":[\"2\"],\"points\":2},{\"question_number\":\"25\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\\/5\",\"acceptable_answers\":[\"2\\/5\"],\"points\":2},{\"question_number\":\"26\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":20}]}', '2026-06-17 17:59:31', 0);
+(1, 'Math', 'uploads/score_keys/sk_6a32e07c883d69.64577606.pdf', 'Prod-1.0', 1, 26, '{\"pace\":{\"subject\":\"Mathematics\",\"pace_number\":\"Comprehensive Mid-Term\",\"title\":\"Math Answer Key\"},\"version\":1,\"questions\":[{\"question_number\":\"1\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"2\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"3\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"4\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"5\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"6\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"7\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"8\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"9\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"10\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"11\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":5},{\"question_number\":\"12\",\"question_type\":\"fill_blank\",\"correct_answer\":\"y = -8\",\"acceptable_answers\":[\"y = -8\"],\"points\":5},{\"question_number\":\"13\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(5, 3)\",\"acceptable_answers\":[\"(5, 3)\"],\"points\":5},{\"question_number\":\"14\",\"question_type\":\"fill_blank\",\"correct_answer\":\"4x^2 - 12x + 9\",\"acceptable_answers\":[\"4x^2 - 12x + 9\"],\"points\":5},{\"question_number\":\"15\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(x-2)(x-3)\",\"acceptable_answers\":[\"(x-2)(x-3)\"],\"points\":5},{\"question_number\":\"16\",\"question_type\":\"fill_blank\",\"correct_answer\":\"30\",\"acceptable_answers\":[\"30\"],\"points\":5},{\"question_number\":\"17\",\"question_type\":\"fill_blank\",\"correct_answer\":\"26\",\"acceptable_answers\":[\"26\"],\"points\":5},{\"question_number\":\"18\",\"question_type\":\"fill_blank\",\"correct_answer\":\"14\\u03c0\",\"acceptable_answers\":[\"14\\u03c0\"],\"points\":5},{\"question_number\":\"19\",\"question_type\":\"fill_blank\",\"correct_answer\":\"15\",\"acceptable_answers\":[\"15\"],\"points\":5},{\"question_number\":\"20\",\"question_type\":\"fill_blank\",\"correct_answer\":\"45\\u03c0\",\"acceptable_answers\":[\"45\\u03c0\"],\"points\":5},{\"question_number\":\"21\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x^5\",\"acceptable_answers\":[\"x^5\"],\"points\":2},{\"question_number\":\"22\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 9\",\"acceptable_answers\":[\"x = 9\"],\"points\":2},{\"question_number\":\"23\",\"question_type\":\"fill_blank\",\"correct_answer\":\"6\",\"acceptable_answers\":[\"6\"],\"points\":2},{\"question_number\":\"24\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\",\"acceptable_answers\":[\"2\"],\"points\":2},{\"question_number\":\"25\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\\/5\",\"acceptable_answers\":[\"2\\/5\"],\"points\":2},{\"question_number\":\"26\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":20}]}', '2026-06-17 17:59:31', 0),
+(2, 'Basic', 'uploads/score_keys/sk_6a411a10c98318.87566474.pdf', 'Prod-1.0', 1, 0, '{}', '2026-06-28 12:56:48', 0),
+(3, 'Test', 'uploads/score_keys/sk_6a411beed137a6.26702306.jpg', 'Prod-1.0', 1, 0, '{}', '2026-06-28 13:04:46', 0),
+(4, 'Mathm', 'uploads/score_keys/sk_6a43723fdcd975.93548363.pdf', 'Prod-1.0', 1, 0, '[]', '2026-06-28 13:15:40', 0);
 
 -- --------------------------------------------------------
 
@@ -283,7 +371,8 @@ CREATE TABLE `teacher_student` (
 --
 
 INSERT INTO `teacher_student` (`teacher_id`, `student_id`) VALUES
-(2, 3);
+(2, 3),
+(4, 3);
 
 -- --------------------------------------------------------
 
@@ -308,7 +397,8 @@ CREATE TABLE `users` (
 INSERT INTO `users` (`id`, `full_name`, `email`, `password`, `role`, `is_verified`, `created_at`) VALUES
 (1, 'Admin', 'admin@watotoschools.com', '$2y$10$02GjxtXOLkFNuQAhdF1umOMIoYR5.v3W0pJxan0U2x5PhAtmxKh5a', 'admin', 1, '2026-06-17 08:27:02'),
 (2, 'Teacher One', 'teacher1@school.local', '$2y$10$DZzLYsAaRPUPytPSkxXfse9hcgS/zM8cxa6HGRWS9of7KBCFf/Uka', 'teacher', 1, '2026-06-17 08:27:49'),
-(3, 'Student One', 'student1@school.local', '$2y$10$GWHhJi/3x12UNEFwIfHtXuqCO3y0dg0TMdzcSIadvXHN2tuL0jCKK', 'student', 1, '2026-06-17 08:28:01');
+(3, 'Student One', 'student1@school.local', '$2y$10$GWHhJi/3x12UNEFwIfHtXuqCO3y0dg0TMdzcSIadvXHN2tuL0jCKK', 'student', 1, '2026-06-17 08:28:01'),
+(4, 'Teacher Two', 'teacher2@watotoschools.com', '$2y$10$k/sdmV8ErICSSqNVQ0v/Kuf8Ld4FcuPkqqhGNaLDbiml/S9FZzAKC', 'teacher', 1, '2026-06-30 07:41:27');
 
 -- --------------------------------------------------------
 
@@ -416,7 +506,7 @@ ALTER TABLE `votes`
 -- AUTO_INCREMENT for table `assignments`
 --
 ALTER TABLE `assignments`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
 
 --
 -- AUTO_INCREMENT for table `candidates`
@@ -434,13 +524,13 @@ ALTER TABLE `help_requests`
 -- AUTO_INCREMENT for table `messages`
 --
 ALTER TABLE `messages`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=9;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=37;
 
 --
 -- AUTO_INCREMENT for table `notifications`
 --
 ALTER TABLE `notifications`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=18;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=71;
 
 --
 -- AUTO_INCREMENT for table `ocr_results`
@@ -458,13 +548,13 @@ ALTER TABLE `positions`
 -- AUTO_INCREMENT for table `score_keys`
 --
 ALTER TABLE `score_keys`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=4;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
 
 --
 -- AUTO_INCREMENT for table `votes`
