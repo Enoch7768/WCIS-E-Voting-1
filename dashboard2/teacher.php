@@ -18,12 +18,7 @@ function log_error($message, $context = []) {
     error_log($logEntry . "\n", 3, $logDir . '/teacher_errors.log');
 }
 
-/**
- * Normalizes an uploaded file field (which may be a single file or an
- * array of files, e.g. from name="score_key_file[]") into a flat list
- * of individual file arrays: [['name'=>..,'type'=>..,'tmp_name'=>..,'error'=>..,'size'=>..], ...]
- * Order of the returned array matches the order the browser submitted the files in.
- */
+
 function normalize_uploaded_files($field) {
     $files = [];
     if (!isset($field['name'])) return $files;
@@ -44,12 +39,6 @@ function normalize_uploaded_files($field) {
     return $files;
 }
 
-/**
- * Validates and moves a set of uploaded score-key files.
- * Rules: either exactly one PDF, or one-or-more images (png/jpg/jpeg).
- * Images are stored in the order they were submitted.
- * Returns an array of destination paths, in upload order.
- */
 function process_score_key_uploads($files) {
     $maxSize = 40 * 1024 * 1024;
     $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
@@ -96,18 +85,9 @@ function process_score_key_uploads($files) {
     return $destPaths;
 }
 
-/**
- * Builds the value to store in score_keys.file_path from a list of moved
- * destination paths, guarding against overflowing the DB column.
- * - 1 file  -> stored as a plain path string (backward compatible).
- * - 2+ files -> stored as a JSON array, in upload order.
- * If the JSON would be too large to store safely, the already-moved files
- * are deleted and an exception is thrown instead of silently truncating.
- */
+
 function build_stored_file_path($destPaths) {
-    // Safe ceiling assuming the file_path column is TEXT (max 65,535 bytes).
-    // Kept well under that to leave headroom and stay safe even if the
-    // column turns out to be a smaller type (e.g. VARCHAR).
+
     $maxStoredPathBytes = 60000;
 
     $storedPath = (count($destPaths) === 1) ? $destPaths[0] : json_encode($destPaths);
@@ -347,8 +327,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 $files = normalize_uploaded_files($_FILES['score_key_file']);
                 $destPaths = process_score_key_uploads($files);
-                // Single PDF is stored as a plain path (backward compatible);
-                // one or more images are stored as a JSON array, preserving upload order.
                 $storedPath = build_stored_file_path($destPaths);
 
                 $question_structure = [];
@@ -1158,7 +1136,6 @@ body {
 	display: none;
 }
     
-/* ============ Responsive & Fun Animations (added) ============ */
 @keyframes fadeInUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:translateY(0);} }
 @keyframes modalPop { from { opacity:0; transform:scale(.92);} to { opacity:1; transform:scale(1);} }
 @keyframes badgePop { 0%{transform:scale(.8);} 60%{transform:scale(1.08);} 100%{transform:scale(1);} }
@@ -1182,7 +1159,6 @@ body {
 .chat-bubble { transition: transform .15s ease; }
 .chat-row:hover .chat-bubble { transform: translateY(-1px); }
 
-/* ============ Responsive breakpoints (added) ============ */
 @media (max-width: 900px) {
     .container-center { padding: 20px 12px; }
     .card { width: 100%; }

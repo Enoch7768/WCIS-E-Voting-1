@@ -89,9 +89,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         $data = $stmt->fetch();
         if ($data && $data['question_structure']) {
             $structure = json_decode($data['question_structure'], true);
-
-            // file_path may be a single path (PDF/legacy single image) or a JSON-encoded
-            // array of image paths uploaded by the teacher, stored in upload order.
             $filePaths = [];
             $rawPath = $data['file_path'];
             if ($rawPath) {
@@ -100,8 +97,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
                 if (is_array($decoded)) {
                     $filePaths = array_values($decoded);
                 } elseif ($looksLikeJsonArray) {
-                    // Starts like a JSON array but failed to decode (e.g. truncated by a
-                    // too-narrow DB column) — don't treat the broken string as a real path.
                     log_error('get_score_key_details: corrupted file_path JSON', ['assignment_id' => $asm_id, 'raw_length' => strlen($rawPath)]);
                     echo json_encode(['error' => 'Score key files are corrupted on the server. Please ask your teacher to re-upload the score key.']);
                     exit;
@@ -934,7 +929,6 @@ body {
 	gap: 4px;
 }
     
-/* ============ Responsive & Fun Animations (added) ============ */
 @keyframes fadeInUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:translateY(0);} }
 @keyframes modalPop { from { opacity:0; transform:scale(.92);} to { opacity:1; transform:scale(1);} }
 @keyframes badgePop { 0%{transform:scale(.8);} 60%{transform:scale(1.08);} 100%{transform:scale(1);} }
@@ -958,7 +952,6 @@ body {
 .chat-bubble { transition: transform .15s ease; }
 .chat-row:hover .chat-bubble { transform: translateY(-1px); }
 
-/* ============ Responsive breakpoints (added) ============ */
 @media (max-width: 900px) {
     .container-center { padding: 20px 12px; }
     .card { width: 100%; }
@@ -1163,7 +1156,6 @@ async function openSelfScoreModal(asmId) {
 
     let html = '<div style="margin-bottom:16px;">';
     if (filePaths.length > 1) {
-        // Multiple images uploaded by the teacher: show them stacked, in the exact order uploaded.
         html += '<div class="score-key-gallery" style="display:flex; flex-direction:column; gap:12px;">';
         filePaths.forEach((p, idx) => {
             html += `<div class="score-key-page">
@@ -1364,7 +1356,6 @@ document.getElementById('voicePauseBtn').addEventListener('click', toggleVoicePa
 document.getElementById('voiceReplayBtn').addEventListener('click', replayVoiceRecording);
 
 function chatParseDate(ts) {
-    // MySQL datetime "YYYY-MM-DD HH:MM:SS" -> treat as local time
     return new Date(String(ts).replace(' ', 'T'));
 }
 function chatFormatTime(ts) {
