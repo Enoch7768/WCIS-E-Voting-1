@@ -18,6 +18,114 @@ function log_error($message, $context = []) {
     error_log($logEntry . "\n", 3, $logDir . '/teacher_errors.log');
 }
 
+/**
+ * Normalizes an uploaded file field (which may be a single file or an
+ * array of files, e.g. from name="score_key_file[]") into a flat list
+ * of individual file arrays: [['name'=>..,'type'=>..,'tmp_name'=>..,'error'=>..,'size'=>..], ...]
+ * Order of the returned array matches the order the browser submitted the files in.
+ */
+function normalize_uploaded_files($field) {
+    $files = [];
+    if (!isset($field['name'])) return $files;
+    if (is_array($field['name'])) {
+        $count = count($field['name']);
+        for ($i = 0; $i < $count; $i++) {
+            $files[] = [
+                'name'     => $field['name'][$i],
+                'type'     => $field['type'][$i],
+                'tmp_name' => $field['tmp_name'][$i],
+                'error'    => $field['error'][$i],
+                'size'     => $field['size'][$i],
+            ];
+        }
+    } else {
+        $files[] = $field;
+    }
+    return $files;
+}
+
+/**
+ * Validates and moves a set of uploaded score-key files.
+ * Rules: either exactly one PDF, or one-or-more images (png/jpg/jpeg).
+ * Images are stored in the order they were submitted.
+ * Returns an array of destination paths, in upload order.
+ */
+function process_score_key_uploads($files) {
+    $maxSize = 40 * 1024 * 1024;
+    $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
+
+    if (empty($files)) {
+        throw new Exception('No file uploaded.');
+    }
+
+    $exts = [];
+    foreach ($files as $f) {
+        if (($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            throw new Exception('File upload failed: ' . get_upload_error_message($f['error'] ?? UPLOAD_ERR_NO_FILE));
+        }
+        if (($f['size'] ?? 0) > $maxSize) {
+            throw new Exception('File "' . $f['name'] . '" exceeds 40 MB limit.');
+        }
+        $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, $allowed, true)) {
+            throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
+        }
+        $exts[] = $ext;
+    }
+
+    $hasPdf = in_array('pdf', $exts, true);
+    if ($hasPdf && count($files) > 1) {
+        throw new Exception('Only one PDF file may be uploaded at a time. To upload multiple pages, use image files instead.');
+    }
+
+    if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
+
+    $destPaths = [];
+    foreach ($files as $f) {
+        $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
+        $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
+        if (!move_uploaded_file($f['tmp_name'], $destPath)) {
+            foreach ($destPaths as $done) {
+                if (file_exists($done)) @unlink($done);
+            }
+            throw new Exception('Failed to move uploaded file "' . $f['name'] . '".');
+        }
+        $destPaths[] = $destPath;
+    }
+
+    return $destPaths;
+}
+
+/**
+ * Builds the value to store in score_keys.file_path from a list of moved
+ * destination paths, guarding against overflowing the DB column.
+ * - 1 file  -> stored as a plain path string (backward compatible).
+ * - 2+ files -> stored as a JSON array, in upload order.
+ * If the JSON would be too large to store safely, the already-moved files
+ * are deleted and an exception is thrown instead of silently truncating.
+ */
+function build_stored_file_path($destPaths) {
+    // Safe ceiling assuming the file_path column is TEXT (max 65,535 bytes).
+    // Kept well under that to leave headroom and stay safe even if the
+    // column turns out to be a smaller type (e.g. VARCHAR).
+    $maxStoredPathBytes = 60000;
+
+    $storedPath = (count($destPaths) === 1) ? $destPaths[0] : json_encode($destPaths);
+
+    if (strlen($storedPath) > $maxStoredPathBytes) {
+        foreach ($destPaths as $done) {
+            if (file_exists($done)) @unlink($done);
+        }
+        throw new Exception(
+            'Too many images/too large a combined file list to store (' . count($destPaths) . ' files). ' .
+            'Please split this score key into smaller batches, or ask your administrator to confirm the ' .
+            'score_keys.file_path database column is of type TEXT.'
+        );
+    }
+
+    return $storedPath;
+}
+
 function get_upload_error_message($errorCode) {
     switch ($errorCode) {
         case UPLOAD_ERR_INI_SIZE:   return 'File exceeds server upload limit.';
@@ -116,7 +224,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
         exit;
     }
     if ($action === 'get_notifications') {
-        $stmt = $pdo->prepare("SELECT * FROM notifications WHERE user_id = ? AND is_read = 0 ORDER BY created_at DESC");
+        $stmt = $pdo->prepare("
+            SELECT n.*, u.full_name as sender_name, u.email as sender_email
+            FROM notifications n
+            LEFT JOIN users u ON n.sender_id = u.id
+            WHERE n.user_id = ? AND n.is_read = 0
+            ORDER BY n.created_at DESC
+        ");
         $stmt->execute([$teacher_id]);
         echo json_encode($stmt->fetchAll(PDO::FETCH_ASSOC));
         exit;
@@ -230,40 +344,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!isset($_FILES['score_key_file'])) {
                     throw new Exception('No file uploaded.');
                 }
-                if ($_FILES['score_key_file']['error'] !== UPLOAD_ERR_OK) {
-                    $errorCode = $_FILES['score_key_file']['error'];
-                    throw new Exception('File upload failed: ' . get_upload_error_message($errorCode));
-                }
 
-                $file = $_FILES['score_key_file'];
-                $maxSize = 40 * 1024 * 1024;
-                if ($file['size'] > $maxSize) {
-                    throw new Exception('File size exceeds 40 MB limit.');
-                }
-
-                $fileName = $file['name'];
-                $ext = strtolower(pathinfo($fileName, PATHINFO_EXTENSION));
-                $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
-                if (!in_array($ext, $allowed, true)) {
-                    throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
-                }
-
-                if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
-                $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
-                if (!move_uploaded_file($file['tmp_name'], $destPath)) {
-                    throw new Exception('Failed to move uploaded file.');
-                }
+                $files = normalize_uploaded_files($_FILES['score_key_file']);
+                $destPaths = process_score_key_uploads($files);
+                // Single PDF is stored as a plain path (backward compatible);
+                // one or more images are stored as a JSON array, preserving upload order.
+                $storedPath = build_stored_file_path($destPaths);
 
                 $question_structure = [];
                 $question_count = 0;
                 try {
                     $stmt = $pdo->prepare("INSERT INTO score_keys (pace, file_path, version, is_published, question_count, question_structure) VALUES (?, ?, 'Draft-1.0', 0, ?, ?)");
-                    $stmt->execute([$pace_title, $destPath, $question_count, json_encode($question_structure)]);
+                    $stmt->execute([$pace_title, $storedPath, $question_count, json_encode($question_structure)]);
                 } catch (PDOException $e) {
                     log_error('upload_score_key DB error', ['pace' => $pace_title, 'error' => $e->getMessage()]);
                     throw new Exception('Database error while saving score key.');
                 }
-                $notice = "Score key uploaded successfully.";
+                $notice = count($destPaths) > 1
+                    ? "Score key uploaded successfully (" . count($destPaths) . " images)."
+                    : "Score key uploaded successfully.";
             }
 
             if ($action === 'reupload_score_key') {
@@ -271,39 +370,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $new_pace_title = trim($_POST['pace_title'] ?? '');
                 if ($sk_id <= 0 || $new_pace_title === '') throw new Exception('Missing score key ID or new PACE title.');
 
-                if (!isset($_FILES['score_key_file']) || $_FILES['score_key_file']['error'] !== UPLOAD_ERR_OK) {
-                    $errorCode = $_FILES['score_key_file']['error'] ?? UPLOAD_ERR_NO_FILE;
-                    throw new Exception('File upload failed: ' . get_upload_error_message($errorCode));
+                if (!isset($_FILES['score_key_file'])) {
+                    throw new Exception('No file uploaded.');
                 }
 
-                $file = $_FILES['score_key_file'];
-                $maxSize = 40 * 1024 * 1024;
-                if ($file['size'] > $maxSize) {
-                    throw new Exception('File size exceeds 40 MB limit.');
-                }
-
-                $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
-                $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
-                if (!in_array($ext, $allowed, true)) {
-                    throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
-                }
-
-                if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
-                $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
-                if (!move_uploaded_file($file['tmp_name'], $destPath)) {
-                    throw new Exception('Failed to move uploaded file.');
-                }
+                $files = normalize_uploaded_files($_FILES['score_key_file']);
+                $destPaths = process_score_key_uploads($files);
+                $storedPath = build_stored_file_path($destPaths);
 
                 $question_structure = [];
                 $question_count = 0;
                 try {
                     $stmt = $pdo->prepare("UPDATE score_keys SET pace = ?, file_path = ?, version = 'Draft-1.0', is_published = 0, question_count = ?, question_structure = ? WHERE id = ?");
-                    $stmt->execute([$new_pace_title, $destPath, $question_count, json_encode($question_structure), $sk_id]);
+                    $stmt->execute([$new_pace_title, $storedPath, $question_count, json_encode($question_structure), $sk_id]);
                 } catch (PDOException $e) {
                     log_error('reupload_score_key DB error', ['sk_id' => $sk_id, 'error' => $e->getMessage()]);
                     throw new Exception('Database error while updating score key.');
                 }
-                $notice = "Score key re‑uploaded successfully.";
+                $notice = count($destPaths) > 1
+                    ? "Score key re‑uploaded successfully (" . count($destPaths) . " images)."
+                    : "Score key re‑uploaded successfully.";
             }
 
             if ($action === 'publish_score_key') {
@@ -380,7 +466,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new Exception('Database error while sending message.');
                 }
 
-                send_notification($student_id, $teacher_id, 'message', "New message from teacher");
+                send_notification($student_id, $teacher_id, 'message', $attachment_path ? 'Sent an attachment' : 'Sent a message: ' . mb_strimwidth($msg_body, 0, 80, '...'));
                 if (!empty($_SERVER['HTTP_X_REQUESTED_WITH'])) {
                     header('Content-Type: application/json'); echo json_encode(['status' => 'success']); exit;
                 }
@@ -799,10 +885,335 @@ body {
 	display: none;
 }
 
+.chat-day-sep {
+	text-align: center;
+	margin: 14px 0 10px;
+}
+.chat-day-sep span {
+	background: rgba(255,255,255,.08);
+	color: var(--muted);
+	font-size: 11px;
+	padding: 4px 12px;
+	border-radius: 12px;
+	letter-spacing: .2px;
+}
+.chat-row {
+	display: flex;
+	margin-bottom: 6px;
+}
+.chat-row.me { justify-content: flex-end; }
+.chat-row.them { justify-content: flex-start; }
+.chat-bubble {
+	position: relative;
+	max-width: 78%;
+	padding: 7px 56px 18px 10px;
+	border-radius: 10px;
+	font-size: 13px;
+	line-height: 1.4;
+	text-align: left;
+	word-wrap: break-word;
+	box-shadow: 0 1px 2px rgba(0,0,0,.25);
+}
+.chat-bubble.me {
+	background: linear-gradient(180deg, rgba(110,139,255,.28), rgba(110,139,255,.18));
+	border-top-right-radius: 2px;
+}
+.chat-bubble.them {
+	background: rgba(255,255,255,.06);
+	border-top-left-radius: 2px;
+}
+.chat-sender {
+	font-size: 11px;
+	color: var(--muted);
+	margin-bottom: 2px;
+	font-weight: 600;
+}
+.chat-time {
+	position: absolute;
+	bottom: 4px;
+	right: 10px;
+	font-size: 10px;
+	color: rgba(233,236,248,.55);
+	white-space: nowrap;
+}
+.chat-bubble img {
+	max-width: 220px;
+	max-height: 160px;
+	border-radius: 8px;
+	margin-top: 4px;
+	display: block;
+}
+.chat-bubble audio {
+	max-width: 230px;
+	margin-top: 4px;
+	display: block;
+	height: 36px;
+}
+.chat-bubble a.btn {
+	margin-top: 4px;
+}
+
+.voice-recorder-bar {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	background: rgba(255,255,255,.04);
+	border: 1px solid rgba(255,255,255,.08);
+	border-radius: 24px;
+	padding: 7px 10px 7px 6px;
+}
+.voice-rec-cancel {
+	background: none;
+	border: none;
+	color: var(--danger);
+	font-size: 16px;
+	cursor: pointer;
+	padding: 4px 8px;
+	line-height: 1;
+}
+.voice-rec-indicator {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--text);
+	min-width: 52px;
+}
+.voice-rec-pause {
+	background: none;
+	border: none;
+	cursor: pointer;
+	padding: 2px 4px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	color: var(--text);
+	font-size: 11px;
+	line-height: 1;
+}
+.voice-rec-dot {
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	background: var(--danger);
+	animation: voiceRecPulse 1s infinite;
+	flex-shrink: 0;
+}
+@keyframes voiceRecPulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: .25; }
+}
+.voice-rec-wave {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	height: 22px;
+	overflow: hidden;
+}
+.voice-rec-wave span {
+	width: 3px;
+	min-height: 4px;
+	border-radius: 2px;
+	background: var(--primary);
+	animation: voiceRecWave 1.1s ease-in-out infinite;
+}
+.voice-rec-wave span:nth-child(1) { height: 30%; animation-delay: 0s; }
+.voice-rec-wave span:nth-child(2) { height: 70%; animation-delay: .1s; }
+.voice-rec-wave span:nth-child(3) { height: 45%; animation-delay: .2s; }
+.voice-rec-wave span:nth-child(4) { height: 90%; animation-delay: .3s; }
+.voice-rec-wave span:nth-child(5) { height: 55%; animation-delay: .4s; }
+.voice-rec-wave span:nth-child(6) { height: 80%; animation-delay: .5s; }
+.voice-rec-wave span:nth-child(7) { height: 35%; animation-delay: .6s; }
+.voice-rec-wave span:nth-child(8) { height: 65%; animation-delay: .7s; }
+@keyframes voiceRecWave {
+	0%, 100% { transform: scaleY(.35); }
+	50% { transform: scaleY(1); }
+}
+.voice-rec-wave.paused span {
+	animation-play-state: paused;
+}
+.voice-rec-replay {
+	background: rgba(255,255,255,.12);
+	border: none;
+	color: var(--text);
+	width: 26px;
+	height: 26px;
+	min-width: 26px;
+	border-radius: 50%;
+	cursor: pointer;
+	font-size: 11px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+.voice-rec-replay:hover {
+	background: rgba(255,255,255,.2);
+}
+.voice-rec-send {
+	background: var(--primary);
+	border: none;
+	color: #fff;
+	width: 32px;
+	height: 32px;
+	min-width: 32px;
+	border-radius: 50%;
+	cursor: pointer;
+	font-size: 14px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.voice-msg-player {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 4px;
+	min-width: 200px;
+}
+.vmp-btn {
+	background: rgba(255,255,255,.12);
+	border: none;
+	color: var(--text);
+	width: 28px;
+	height: 28px;
+	min-width: 28px;
+	border-radius: 50%;
+	cursor: pointer;
+	font-size: 12px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+.vmp-btn:hover { background: rgba(255,255,255,.2); }
+.vmp-progress {
+	flex: 1;
+	height: 4px;
+	background: rgba(255,255,255,.15);
+	border-radius: 2px;
+	cursor: pointer;
+	position: relative;
+}
+.vmp-progress-fill {
+	height: 100%;
+	width: 0%;
+	background: var(--primary);
+	border-radius: 2px;
+}
+.vmp-time {
+	font-size: 10px;
+	color: rgba(233,236,248,.6);
+	min-width: 32px;
+	text-align: right;
+	flex-shrink: 0;
+}
+
+.attach-media-wrap {
+	position: relative;
+	display: inline-block;
+	max-width: 100%;
+}
+.attach-download-icon {
+	position: absolute;
+	top: 6px;
+	right: 6px;
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	background: rgba(0,0,0,.55);
+	color: #fff;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 11px;
+	text-decoration: none;
+	line-height: 1;
+}
+.attach-download-icon:hover {
+	background: rgba(0,0,0,.75);
+}
+.vmp-download {
+	width: 22px;
+	height: 22px;
+	min-width: 22px;
+	border-radius: 50%;
+	background: rgba(255,255,255,.12);
+	color: var(--text);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 10px;
+	text-decoration: none;
+	flex-shrink: 0;
+}
+.vmp-download:hover {
+	background: rgba(255,255,255,.2);
+}
+
 .hidden {
 	display: none;
 }
-    </style>
+    
+/* ============ Responsive & Fun Animations (added) ============ */
+@keyframes fadeInUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:translateY(0);} }
+@keyframes modalPop { from { opacity:0; transform:scale(.92);} to { opacity:1; transform:scale(1);} }
+@keyframes badgePop { 0%{transform:scale(.8);} 60%{transform:scale(1.08);} 100%{transform:scale(1);} }
+@keyframes shakeX { 10%,90%{transform:translateX(-1px);} 20%,80%{transform:translateX(2px);} 30%,50%,70%{transform:translateX(-4px);} 40%,60%{transform:translateX(4px);} }
+@keyframes rowIn { from { opacity:0; transform:translateX(-6px);} to { opacity:1; transform:translateX(0);} }
+@keyframes bellRing { 0%,100%{transform:rotate(0);} 10%,30%{transform:rotate(-12deg);} 20%,40%{transform:rotate(12deg);} 50%{transform:rotate(0);} }
+
+.card { animation: fadeInUp .5s ease both; }
+.btn { transition: transform .18s ease, box-shadow .18s ease, filter .18s ease; }
+.btn:hover { transform: translateY(-2px); filter: brightness(1.08); }
+.btn:active { transform: translateY(0) scale(.96); }
+.input, .select { transition: box-shadow .25s ease, border-color .25s ease, transform .15s ease; }
+.input:focus, .select:focus { transform: translateY(-1px); }
+.badge { animation: badgePop .35s ease; }
+.alert--error { animation: shakeX .4s ease; }
+.modal__content { animation: modalPop .25s ease; }
+.table-wrap { -webkit-overflow-scrolling: touch; }
+.table tbody tr { animation: rowIn .35s ease both; transition: background .2s ease; }
+.logo { transition: transform .3s ease, filter .3s ease; }
+.notif-bell:hover { animation: bellRing .5s ease; }
+.chat-bubble { transition: transform .15s ease; }
+.chat-row:hover .chat-bubble { transform: translateY(-1px); }
+
+/* ============ Responsive breakpoints (added) ============ */
+@media (max-width: 900px) {
+    .container-center { padding: 20px 12px; }
+    .card { width: 100%; }
+    .card__body, .card__header { padding: 18px; }
+    .row { grid-template-columns: 1fr; }
+    .toolbar { flex-wrap: wrap; gap: 10px; }
+    .header { flex-wrap: wrap; }
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 640px) {
+    .card__title { font-size: 19px; }
+    .card__sub { font-size: 12px; }
+    .btn { padding: 10px 14px; font-size: 13.5px; }
+    .modal__content { width: 96vw; max-height: 88vh; overflow: auto; }
+    .modal__body { padding: 14px 16px; }
+    .table th, .table td { padding: 10px 8px; font-size: 12.5px; }
+    .logo { width: 56px; height: 56px; }
+    .chat-bubble { max-width: 88%; }
+    header .header > div[style*="display:flex"] { flex-wrap: wrap; }
+}
+
+@media (max-width: 420px) {
+    .card__body { padding: 14px; }
+    .toolbar { flex-direction: column; align-items: stretch; }
+    .toolbar .btn { width: 100%; }
+    .modal__head { padding: 14px 16px; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+}
+
+</style>
 </head>
 <body>
 <main class="container-center">
@@ -994,8 +1405,9 @@ body {
                 <input type="hidden" name="action" value="upload_score_key">
                 <label class="label">PACE Title</label>
                 <input class="input" name="pace_title" placeholder="e.g. Mathematics 1021" required>
-                <label class="label">Score Key (Supported: PDF, PNG, JPG)</label>
-                <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required multiple>
+                <label class="label">Score Key (Supported: PDF, or multiple PNG/JPG images)</label>
+                <input type="file" class="input" name="score_key_file[]" accept=".pdf,image/*" required multiple>
+                <p class="helper-text">Select a single PDF, or select multiple images (they will be stored and shown to the student in the order you select them).</p>
                 <button type="submit" class="btn btn--primary" style="margin-top:12px">Upload Score Key</button>
             </form>
         </div>
@@ -1015,8 +1427,9 @@ body {
                 <input type="hidden" name="score_key_id" id="reupload_sk_id">
                 <label class="label">PACE Title</label>
                 <input class="input" name="pace_title" id="reupload_pace_title" placeholder="e.g. Mathematics 1021" required>
-                <label class="label">New Score Key File (PDF, PNG, JPG)</label>
-                <input type="file" class="input" name="score_key_file" accept=".pdf,image/*" required multiple>
+                <label class="label">New Score Key File (PDF, or multiple PNG/JPG images)</label>
+                <input type="file" class="input" name="score_key_file[]" accept=".pdf,image/*" required multiple>
+                <p class="helper-text">Select a single PDF, or select multiple images (they will be stored and shown to the student in the order you select them).</p>
                 <p class="helper-text">Uploading will replace the existing file.</p>
                 <button type="submit" class="btn btn--primary" style="margin-top:12px">Re‑upload </button>
             </form>
@@ -1061,7 +1474,7 @@ body {
                 <input type="hidden" name="csrf" value="<?= csrf_token() ?>">
                 <input type="hidden" name="action" value="send_msg">
                 <input type="hidden" name="student_id" id="chat_student_id">
-                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                <div id="chatComposerNormal" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <input class="input" name="message" placeholder="Type a message..." style="flex:1; min-width:150px;">
                     <label class="btn btn--ghost" style="cursor:pointer; padding:8px 12px;"><img src="paper-clip.png" style="width:16px; height:16px; vertical-align:middle;">
                         <input type="file" name="attachment" style="display:none;" onchange="this.form.querySelector('input[name=message]').placeholder='File attached'">
@@ -1069,7 +1482,18 @@ body {
                     <button type="button" class="btn btn--ghost" id="teacherVoiceRecordBtn" style="padding:8px 12px;">🎤</button>
                     <button type="submit" class="btn btn--primary">Send</button>
                 </div>
-                <div id="teacherRecordingStatus" style="font-size:12px; color:var(--muted); display:none;">🔴 Recording...</div>
+                <div id="chatComposerRecording" class="voice-recorder-bar" style="display:none;">
+                    <button type="button" class="voice-rec-cancel" id="teacherVoiceCancelBtn" title="Cancel">🗑️</button>
+                    <div class="voice-rec-indicator">
+                        <button type="button" class="voice-rec-pause" id="teacherVoicePauseBtn" title="Pause"><span class="voice-rec-dot" id="teacherVoiceRecDot"></span></button>
+                        <span class="voice-rec-timer" id="teacherVoiceTimer">0:00</span>
+                    </div>
+                    <div class="voice-rec-wave" id="teacherVoiceRecWave">
+                        <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                    </div>
+                    <button type="button" class="voice-rec-replay" id="teacherVoiceReplayBtn" title="Play recording" style="display:none;">▶</button>
+                    <button type="button" class="voice-rec-send" id="teacherVoiceSendBtn" title="Send">➤</button>
+                </div>
             </form>
         </div>
     </div>
@@ -1154,39 +1578,240 @@ document.getElementById('assignmentLifecycleForm').addEventListener('submit', as
 
 let teacherMediaRecorder;
 let teacherAudioChunks = [];
+let teacherVoiceStream = null;
+let teacherVoiceTimerInterval = null;
+let teacherVoiceStartTime = 0;
+let teacherVoiceElapsedBeforePause = 0;
+let teacherVoiceCancelled = false;
+let teacherVoicePaused = false;
+let teacherVoicePreviewAudio = null;
 
-document.getElementById('teacherVoiceRecordBtn').addEventListener('click', async function() {
-    const status = document.getElementById('teacherRecordingStatus');
-    if (teacherMediaRecorder && teacherMediaRecorder.state === 'recording') {
-        teacherMediaRecorder.stop();
-        this.textContent = '🎤';
-        status.style.display = 'none';
-        return;
+function teacherVoiceFormatTimer(totalSeconds) {
+    let m = Math.floor(totalSeconds / 60);
+    let s = totalSeconds % 60;
+    return m + ':' + String(s).padStart(2, '0');
+}
+
+function teacherVoiceResetUI() {
+    document.getElementById('teacherVoicePauseBtn').innerHTML = '<span class="voice-rec-dot" id="teacherVoiceRecDot"></span>';
+    document.getElementById('teacherVoicePauseBtn').title = 'Pause';
+    document.getElementById('teacherVoiceRecWave').classList.remove('paused');
+    document.getElementById('teacherVoiceReplayBtn').style.display = 'none';
+    document.getElementById('teacherVoiceReplayBtn').textContent = '▶';
+    teacherVoicePaused = false;
+    teacherVoiceElapsedBeforePause = 0;
+    if (teacherVoicePreviewAudio) {
+        teacherVoicePreviewAudio.pause();
+        teacherVoicePreviewAudio = null;
     }
+}
+
+async function startTeacherVoiceRecording() {
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        teacherMediaRecorder = new MediaRecorder(stream);
-        teacherAudioChunks = [];
-        teacherMediaRecorder.ondataavailable = event => teacherAudioChunks.push(event.data);
-        teacherMediaRecorder.onstop = () => {
-            const audioBlob = new Blob(teacherAudioChunks, { type: 'audio/webm' });
-            const file = new File([audioBlob], 'voice_message.webm', { type: 'audio/webm' });
-            const form = document.getElementById('chatDispatchForm');
-            const dataTransfer = new DataTransfer();
-            dataTransfer.items.add(file);
-            const fileInput = form.querySelector('input[name="attachment"]');
-            fileInput.files = dataTransfer.files;
-            form.querySelector('input[name="message"]').placeholder = 'Voice message attached';
-            stream.getTracks().forEach(track => track.stop());
-        };
-        teacherMediaRecorder.start();
-        this.textContent = '⏹️';
-        status.style.display = 'block';
-        status.textContent = '🔴 Recording...';
+        teacherVoiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
         alert('Microphone access denied: ' + err.message);
+        return;
     }
-});
+    teacherVoiceCancelled = false;
+    teacherAudioChunks = [];
+    teacherVoiceResetUI();
+    teacherMediaRecorder = new MediaRecorder(teacherVoiceStream);
+    teacherMediaRecorder.ondataavailable = event => { if (event.data && event.data.size > 0) teacherAudioChunks.push(event.data); };
+    teacherMediaRecorder.onstop = () => {
+        teacherVoiceStream.getTracks().forEach(track => track.stop());
+        clearInterval(teacherVoiceTimerInterval);
+        document.getElementById('chatComposerRecording').style.display = 'none';
+        document.getElementById('chatComposerNormal').style.display = 'flex';
+        teacherVoiceResetUI();
+        if (teacherVoiceCancelled || teacherAudioChunks.length === 0) return;
+        const audioBlob = new Blob(teacherAudioChunks, { type: 'audio/webm' });
+        sendTeacherVoiceMessage(audioBlob);
+    };
+    teacherMediaRecorder.start();
+
+    document.getElementById('chatComposerNormal').style.display = 'none';
+    document.getElementById('chatComposerRecording').style.display = 'flex';
+    teacherVoiceStartTime = Date.now();
+    document.getElementById('teacherVoiceTimer').textContent = '0:00';
+    teacherVoiceTimerInterval = setInterval(() => {
+        const sec = Math.floor((teacherVoiceElapsedBeforePause + (Date.now() - teacherVoiceStartTime)) / 1000);
+        document.getElementById('teacherVoiceTimer').textContent = teacherVoiceFormatTimer(sec);
+    }, 250);
+}
+
+function toggleTeacherVoicePause() {
+    if (!teacherMediaRecorder) return;
+    if (!teacherVoicePaused) {
+        if (teacherMediaRecorder.state === 'recording') teacherMediaRecorder.pause();
+        teacherVoicePaused = true;
+        teacherVoiceElapsedBeforePause += Date.now() - teacherVoiceStartTime;
+        clearInterval(teacherVoiceTimerInterval);
+        document.getElementById('teacherVoicePauseBtn').innerHTML = '▶';
+        document.getElementById('teacherVoicePauseBtn').title = 'Resume';
+        document.getElementById('teacherVoiceRecWave').classList.add('paused');
+        document.getElementById('teacherVoiceReplayBtn').style.display = 'inline-flex';
+    } else {
+        if (teacherVoicePreviewAudio) { teacherVoicePreviewAudio.pause(); teacherVoicePreviewAudio = null; }
+        document.getElementById('teacherVoiceReplayBtn').textContent = '▶';
+        if (teacherMediaRecorder.state === 'paused') teacherMediaRecorder.resume();
+        teacherVoicePaused = false;
+        teacherVoiceStartTime = Date.now();
+        teacherVoiceTimerInterval = setInterval(() => {
+            const sec = Math.floor((teacherVoiceElapsedBeforePause + (Date.now() - teacherVoiceStartTime)) / 1000);
+            document.getElementById('teacherVoiceTimer').textContent = teacherVoiceFormatTimer(sec);
+        }, 250);
+        document.getElementById('teacherVoicePauseBtn').innerHTML = '<span class="voice-rec-dot" id="teacherVoiceRecDot"></span>';
+        document.getElementById('teacherVoicePauseBtn').title = 'Pause';
+        document.getElementById('teacherVoiceRecWave').classList.remove('paused');
+        document.getElementById('teacherVoiceReplayBtn').style.display = 'none';
+    }
+}
+
+function replayTeacherVoiceRecording() {
+    if (!teacherVoicePaused || !teacherMediaRecorder) return;
+    const replayBtn = document.getElementById('teacherVoiceReplayBtn');
+    if (teacherVoicePreviewAudio && !teacherVoicePreviewAudio.paused) {
+        teacherVoicePreviewAudio.pause();
+        teacherVoicePreviewAudio = null;
+        replayBtn.textContent = '▶';
+        return;
+    }
+    const flushAndPlay = () => {
+        if (teacherAudioChunks.length === 0) return;
+        const blob = new Blob(teacherAudioChunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        teacherVoicePreviewAudio = new Audio(url);
+        replayBtn.textContent = '⏸';
+        teacherVoicePreviewAudio.play();
+        teacherVoicePreviewAudio.onended = () => { replayBtn.textContent = '▶'; URL.revokeObjectURL(url); teacherVoicePreviewAudio = null; };
+    };
+    if (teacherMediaRecorder.state === 'paused') {
+        try { teacherMediaRecorder.requestData(); } catch (e) {}
+        setTimeout(flushAndPlay, 60);
+    } else {
+        flushAndPlay();
+    }
+}
+
+function stopTeacherVoiceRecording(cancelled) {
+    teacherVoiceCancelled = cancelled;
+    if (teacherMediaRecorder && (teacherMediaRecorder.state === 'recording' || teacherMediaRecorder.state === 'paused')) {
+        teacherMediaRecorder.stop();
+    }
+}
+
+async function sendTeacherVoiceMessage(blob) {
+    const file = new File([blob], 'voice_message.webm', { type: 'audio/webm' });
+    const fd = new FormData();
+    fd.append('csrf', document.querySelector('#chatDispatchForm input[name="csrf"]').value);
+    fd.append('action', 'send_msg');
+    fd.append('student_id', document.getElementById('chat_student_id').value);
+    fd.append('message', '');
+    fd.append('attachment', file);
+    try {
+        const r = await fetch('', { method: 'POST', body: fd, headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        const res = await r.json();
+        if (res.status === 'success') {
+            const sId = document.getElementById('chat_student_id').value;
+            const studentName = document.getElementById('chatModalTitle').innerText.replace("Chat: ", "");
+            openChatModal(sId, studentName);
+        } else {
+            alert(res.message || 'Failed to send voice message.');
+        }
+    } catch (err) {
+        alert('Failed to send voice message.');
+    }
+}
+
+document.getElementById('teacherVoiceRecordBtn').addEventListener('click', startTeacherVoiceRecording);
+document.getElementById('teacherVoiceCancelBtn').addEventListener('click', () => stopTeacherVoiceRecording(true));
+document.getElementById('teacherVoiceSendBtn').addEventListener('click', () => stopTeacherVoiceRecording(false));
+document.getElementById('teacherVoicePauseBtn').addEventListener('click', toggleTeacherVoicePause);
+document.getElementById('teacherVoiceReplayBtn').addEventListener('click', replayTeacherVoiceRecording);
+
+function chatParseDate(ts) {
+    return new Date(String(ts).replace(' ', 'T'));
+}
+function chatFormatTime(ts) {
+    let d = chatParseDate(ts);
+    let h = d.getHours(), m = d.getMinutes();
+    let ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; if (h === 0) h = 12;
+    return h + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+}
+function chatFormatDaySeparator(ts) {
+    let d = chatParseDate(ts);
+    let today = new Date();
+    let yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    let sameDay = (a, b) => a.toDateString() === b.toDateString();
+    if (sameDay(d, today)) return 'Today';
+    if (sameDay(d, yesterday)) return 'Yesterday';
+    let opts = { day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
+}
+
+function vmpFormatTime(sec) {
+    if (!isFinite(sec) || sec < 0) sec = 0;
+    let m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return m + ':' + String(s).padStart(2, '0');
+}
+
+function initVoiceMessagePlayers(root) {
+    root.querySelectorAll('.voice-msg-player').forEach(player => {
+        const audio = player.querySelector('.vmp-audio');
+        const playBtn = player.querySelector('.vmp-playpause');
+        const replayBtn = player.querySelector('.vmp-replay');
+        const progress = player.querySelector('.vmp-progress');
+        const fill = player.querySelector('.vmp-progress-fill');
+        const timeEl = player.querySelector('.vmp-time');
+
+        audio.addEventListener('loadedmetadata', () => {
+            if (isFinite(audio.duration)) timeEl.textContent = vmpFormatTime(audio.duration);
+        });
+        audio.addEventListener('timeupdate', () => {
+            if (audio.duration) fill.style.width = (audio.currentTime / audio.duration * 100) + '%';
+            timeEl.textContent = vmpFormatTime(audio.currentTime);
+        });
+        audio.addEventListener('ended', () => {
+            playBtn.textContent = '▶';
+            fill.style.width = '0%';
+            timeEl.textContent = vmpFormatTime(audio.duration || 0);
+        });
+
+        playBtn.addEventListener('click', () => {
+            document.querySelectorAll('.vmp-audio').forEach(a => {
+                if (a !== audio && !a.paused) {
+                    a.pause();
+                    const otherPlayer = a.closest('.voice-msg-player');
+                    if (otherPlayer) otherPlayer.querySelector('.vmp-playpause').textContent = '▶';
+                }
+            });
+            if (audio.paused) {
+                audio.play();
+                playBtn.textContent = '⏸';
+            } else {
+                audio.pause();
+                playBtn.textContent = '▶';
+            }
+        });
+
+        replayBtn.addEventListener('click', () => {
+            audio.currentTime = 0;
+            audio.play();
+            playBtn.textContent = '⏸';
+        });
+
+        progress.addEventListener('click', (e) => {
+            if (!audio.duration) return;
+            const rect = progress.getBoundingClientRect();
+            const ratio = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+            audio.currentTime = ratio * audio.duration;
+        });
+    });
+}
 
 async function openChatModal(studentId, studentName) {
     document.getElementById('chat_student_id').value = studentId;
@@ -1198,33 +1823,45 @@ async function openChatModal(studentId, studentName) {
     let r = await fetch('?action=get_chat&student_id=' + studentId);
     let messages = await r.json();
     let markup = '';
+    let lastDay = null;
     messages.forEach(m => {
+        let day = chatFormatDaySeparator(m.created_at);
+        if (day !== lastDay) {
+            markup += `<div class="chat-day-sep"><span>${day}</span></div>`;
+            lastDay = day;
+        }
         let isMe = m.sender_id == <?= $teacher_id ?>;
-        let alignment = isMe ? 'text-align:right;' : 'text-align:left;';
-        let background = isMe ? 'rgba(110,139,255,0.1)' : 'rgba(255,255,255,0.04)';
         let attachmentHtml = '';
         if (m.attachment_path) {
             const ext = m.attachment_path.split('.').pop().toLowerCase();
             const fileName = m.attachment_name || 'download';
-            let downloadLink = `<a href="${m.attachment_path}" download="${fileName}" class="btn btn--ghost" style="margin-top:4px;">Download</a>`;
+            let downloadIcon = `<a href="${m.attachment_path}" download="${fileName}" class="attach-download-icon" title="Download">⬇</a>`;
             if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
-                attachmentHtml = `<div><img src="${m.attachment_path}" style="max-width:200px; max-height:150px; border-radius:8px;"></div>
-                                  <div>${downloadLink}</div>`;
+                attachmentHtml = `<div class="attach-media-wrap"><img src="${m.attachment_path}" alt="attachment">${downloadIcon}</div>`;
             } else if (['mp3','wav','ogg','webm'].includes(ext) || (m.attachment_mime && m.attachment_mime.startsWith('audio/'))) {
-                attachmentHtml = `<div><audio controls src="${m.attachment_path}" style="max-width:200px;"></audio></div>
-                                  <div>${downloadLink}</div>`;
+                attachmentHtml = `<div class="voice-msg-player">
+                    <button type="button" class="vmp-btn vmp-playpause" title="Play">▶</button>
+                    <div class="vmp-progress"><div class="vmp-progress-fill"></div></div>
+                    <span class="vmp-time">0:00</span>
+                    <button type="button" class="vmp-btn vmp-replay" title="Replay">⟲</button>
+                    <audio class="vmp-audio" src="${m.attachment_path}" preload="metadata" style="display:none;"></audio>
+                    <a href="${m.attachment_path}" download="${fileName}" class="vmp-download" title="Download">⬇</a>
+                </div>`;
             } else {
                 attachmentHtml = `<div><a href="${m.attachment_path}" download="${fileName}" class="btn btn--ghost">📎 ${fileName}</a></div>`;
             }
         }
-        markup += `<div style="${alignment} margin-bottom:8px;">
-            <div style="display:inline-block; padding:8px 12px; background:${background}; border-radius:8px; max-width:80%; font-size:13px; text-align:left;">
+        markup += `<div class="chat-row ${isMe ? 'me' : 'them'}">
+            <div class="chat-bubble ${isMe ? 'me' : 'them'}">
+                ${isMe ? '' : `<div class="chat-sender">${m.sender_name}</div>`}
                 ${m.body || ''}
                 ${attachmentHtml}
+                <span class="chat-time">${chatFormatTime(m.created_at)}</span>
             </div>
         </div>`;
     });
     box.innerHTML = markup || '<div style="color:var(--muted); font-size:12px; text-align:center;">No direct thread interaction logged.</div>';
+    initVoiceMessagePlayers(box);
 
     void box.offsetHeight;                          
     requestAnimationFrame(() => {
@@ -1260,7 +1897,8 @@ async function fetchNotifications() {
         badge.style.display = 'inline';
         if (notifs.length > lastNotifCount) {
             if (Notification.permission === 'granted') {
-                new Notification('New Notification', {
+                let from = notifs[0].sender_name || notifs[0].sender_email || 'Unknown';
+                new Notification('Notification from ' + from, {
                     body: notifs[0].message,
                     icon: '../WCIS_LOGO-1-removebg-preview.png'
                 });
@@ -1284,7 +1922,9 @@ async function openNotifications() {
     } else {
         let html = '';
         notifs.forEach(n => {
+            let from = n.sender_name || n.sender_email || 'Unknown';
             html += `<div style="padding:10px; background:rgba(255,255,255,0.03); border-radius:8px; border:1px solid rgba(255,255,255,0.06);">
+                <div style="font-size:11px; color:var(--primary); font-weight:600; margin-bottom:2px;">${from}</div>
                 <div style="font-size:13px;">${n.message}</div>
                 <div style="font-size:11px; color:var(--muted);">${n.created_at}</div>
             </div>`;
@@ -1301,17 +1941,26 @@ if ('Notification' in window) {
 }
 setInterval(fetchNotifications, 10000);
 fetchNotifications();
-document.querySelector('input[name="score_key_file"]').addEventListener('change', function() {
-    const files = this.files;
-    const maxSize = 40 * 1024 * 1024; 
+document.querySelectorAll('input[name="score_key_file[]"]').forEach(function(input) {
+    input.addEventListener('change', function() {
+        const files = this.files;
+        const maxSize = 40 * 1024 * 1024;
 
-    for (let i = 0; i < files.length; i++) {
-        if (files[i].size > maxSize) {
-            alert(`The file "${files[i].name}" is too large. Max file size is 40 MB.`);
-            this.value = ""; 
-            break;
+        const hasPdf = Array.from(files).some(f => f.name.toLowerCase().endsWith('.pdf'));
+        if (hasPdf && files.length > 1) {
+            alert('When uploading a PDF, please select only one file. To upload multiple pages, select multiple image files (PNG/JPG) instead.');
+            this.value = "";
+            return;
         }
-    }
+
+        for (let i = 0; i < files.length; i++) {
+            if (files[i].size > maxSize) {
+                alert(`The file "${files[i].name}" is too large. Max file size is 40 MB.`);
+                this.value = "";
+                break;
+            }
+        }
+    });
 });
 </script>
 </body>

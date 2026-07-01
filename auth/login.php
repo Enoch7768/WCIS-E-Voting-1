@@ -271,6 +271,34 @@ body {
    font-size: 14px;
    color: var(--muted);
 }
+
+/* ============ Responsive & Fun Animations (added) ============ */
+@keyframes fadeInUp { from { opacity:0; transform:translateY(16px);} to { opacity:1; transform:translateY(0);} }
+@keyframes shakeX { 10%,90%{transform:translateX(-1px);} 20%,80%{transform:translateX(2px);} 30%,50%,70%{transform:translateX(-4px);} 40%,60%{transform:translateX(4px);} }
+
+.card { animation: fadeInUp .55s ease both; }
+.alert--error { animation: shakeX .4s ease; }
+.input, .select { transition: box-shadow .25s ease, border-color .25s ease, transform .15s ease; }
+.input:focus, .select:focus { transform: translateY(-1px); }
+.btn--primary { transition: transform .18s ease, box-shadow .18s ease; }
+.btn--primary:hover { transform: translateY(-2px); }
+.btn--primary:active { transform: translateY(0) scale(.97); }
+
+/* ============ Responsive breakpoints (added) ============ */
+@media (max-width: 900px) {
+    .container-center { width: 100%; max-width: 100%; padding: 32px 16px; }
+    .card { padding: 36px 28px; }
+}
+
+@media (max-width: 480px) {
+    .container-center { padding: 20px 12px; }
+    .card { padding: 24px 18px; border-radius: 14px; }
+    .card h1 { font-size: 22px; }
+    .card p { font-size: 14px; margin-bottom: 18px; }
+    .logo { width: 76px; height: 76px; }
+    .input, .select, .btn { padding: 13px 14px; font-size: 15px; }
+}
+
 </style>
 </head>
 <body>

@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Jun 30, 2026 at 09:59 AM
+-- Generation Time: Jul 01, 2026 at 11:21 AM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.2.12
 
@@ -59,6 +59,14 @@ CREATE TABLE `candidates` (
   `name` varchar(255) NOT NULL,
   `image` varchar(255) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+--
+-- Dumping data for table `candidates`
+--
+
+INSERT INTO `candidates` (`id`, `position_id`, `name`, `image`) VALUES
+(1, 1, 'Redeemed Winner', 'uploads/candidates/6a44d41493a84.png'),
+(2, 1, 'Redeemed Winner7', 'uploads/candidates/6a44d418d09d1.png');
 
 -- --------------------------------------------------------
 
@@ -145,7 +153,14 @@ INSERT INTO `messages` (`id`, `sender_id`, `receiver_id`, `body`, `created_at`, 
 (33, 3, 2, '', '2026-06-28 13:24:45', 'uploads/chat/chat_6a41209d02c6e4.84395873.php', 'student.php', 'application/octet-stream'),
 (34, 3, 2, 'bb', '2026-06-30 07:16:50', NULL, NULL, NULL),
 (35, 4, 3, 'Hi', '2026-06-30 07:42:18', NULL, NULL, NULL),
-(36, 4, 3, 'Im your second teacher', '2026-06-30 07:42:28', NULL, NULL, NULL);
+(36, 4, 3, 'Im your second teacher', '2026-06-30 07:42:28', NULL, NULL, NULL),
+(37, 3, 2, '', '2026-06-30 12:18:17', 'uploads/chat/chat_6a43b40987f296.23057855.webm', 'voice_message.webm', 'audio/webm'),
+(38, 3, 2, '', '2026-06-30 12:18:39', 'uploads/chat/chat_6a43b41fc72ff9.55433434.png', 'Screenshot (2).png', 'image/png'),
+(39, 2, 3, 'Multi Testing', '2026-06-30 18:47:23', NULL, NULL, NULL),
+(40, 3, 4, 'Testing', '2026-06-30 18:47:51', NULL, NULL, NULL),
+(41, 3, 2, '', '2026-06-30 19:01:33', 'uploads/chat/chat_6a44128d6fb4a3.60974669.webm', 'voice_message.webm', 'audio/webm'),
+(42, 3, 2, '', '2026-06-30 19:01:46', 'uploads/chat/chat_6a44129acfedc7.04783172.webm', 'voice_message.webm', 'audio/webm'),
+(43, 2, 3, '', '2026-06-30 19:15:27', 'uploads/chat/chat_6a4415cf4569b4.10244979.webm', 'voice_message.webm', 'audio/webm');
 
 -- --------------------------------------------------------
 
@@ -238,7 +253,14 @@ INSERT INTO `notifications` (`id`, `user_id`, `sender_id`, `type`, `message`, `l
 (67, 3, 2, 'status_change', 'Assignment updated: Test', NULL, 1, '2026-06-28 13:25:25'),
 (68, 2, 3, 'message', 'New message from student with text', NULL, 1, '2026-06-30 07:16:50'),
 (69, 3, 4, 'message', 'New message from teacher', NULL, 1, '2026-06-30 07:42:18'),
-(70, 3, 4, 'message', 'New message from teacher', NULL, 1, '2026-06-30 07:42:28');
+(70, 3, 4, 'message', 'New message from teacher', NULL, 1, '2026-06-30 07:42:28'),
+(71, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-30 12:18:17'),
+(72, 2, 3, 'message', 'New message from student with attachment', NULL, 1, '2026-06-30 12:18:39'),
+(73, 3, 2, 'message', 'New message from teacher', NULL, 1, '2026-06-30 18:47:23'),
+(74, 4, 3, 'message', 'New message from student with text', NULL, 0, '2026-06-30 18:47:51'),
+(75, 2, 3, 'message', 'Sent an attachment', NULL, 1, '2026-06-30 19:01:33'),
+(76, 2, 3, 'message', 'Sent an attachment', NULL, 1, '2026-06-30 19:01:46'),
+(77, 3, 2, 'message', 'Sent an attachment', NULL, 1, '2026-06-30 19:15:27');
 
 -- --------------------------------------------------------
 
@@ -327,6 +349,13 @@ CREATE TABLE `positions` (
   `name` varchar(255) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+--
+-- Dumping data for table `positions`
+--
+
+INSERT INTO `positions` (`id`, `name`) VALUES
+(1, 'Test Tester');
+
 -- --------------------------------------------------------
 
 --
@@ -336,7 +365,7 @@ CREATE TABLE `positions` (
 CREATE TABLE `score_keys` (
   `id` int(10) UNSIGNED NOT NULL,
   `pace` varchar(255) NOT NULL,
-  `file_path` varchar(255) NOT NULL,
+  `file_path` text DEFAULT NULL,
   `version` varchar(50) NOT NULL DEFAULT 'Draft-1.0',
   `is_published` tinyint(1) NOT NULL DEFAULT 0,
   `question_count` int(10) UNSIGNED NOT NULL DEFAULT 0,
@@ -353,7 +382,7 @@ INSERT INTO `score_keys` (`id`, `pace`, `file_path`, `version`, `is_published`, 
 (1, 'Math', 'uploads/score_keys/sk_6a32e07c883d69.64577606.pdf', 'Prod-1.0', 1, 26, '{\"pace\":{\"subject\":\"Mathematics\",\"pace_number\":\"Comprehensive Mid-Term\",\"title\":\"Math Answer Key\"},\"version\":1,\"questions\":[{\"question_number\":\"1\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"2\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"3\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"4\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"5\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"6\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"7\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"C\",\"acceptable_answers\":[\"C\"],\"points\":4},{\"question_number\":\"8\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"B\",\"acceptable_answers\":[\"B\"],\"points\":4},{\"question_number\":\"9\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"D\",\"acceptable_answers\":[\"D\"],\"points\":4},{\"question_number\":\"10\",\"question_type\":\"multiple_choice\",\"correct_answer\":\"A\",\"acceptable_answers\":[\"A\"],\"points\":4},{\"question_number\":\"11\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":5},{\"question_number\":\"12\",\"question_type\":\"fill_blank\",\"correct_answer\":\"y = -8\",\"acceptable_answers\":[\"y = -8\"],\"points\":5},{\"question_number\":\"13\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(5, 3)\",\"acceptable_answers\":[\"(5, 3)\"],\"points\":5},{\"question_number\":\"14\",\"question_type\":\"fill_blank\",\"correct_answer\":\"4x^2 - 12x + 9\",\"acceptable_answers\":[\"4x^2 - 12x + 9\"],\"points\":5},{\"question_number\":\"15\",\"question_type\":\"fill_blank\",\"correct_answer\":\"(x-2)(x-3)\",\"acceptable_answers\":[\"(x-2)(x-3)\"],\"points\":5},{\"question_number\":\"16\",\"question_type\":\"fill_blank\",\"correct_answer\":\"30\",\"acceptable_answers\":[\"30\"],\"points\":5},{\"question_number\":\"17\",\"question_type\":\"fill_blank\",\"correct_answer\":\"26\",\"acceptable_answers\":[\"26\"],\"points\":5},{\"question_number\":\"18\",\"question_type\":\"fill_blank\",\"correct_answer\":\"14\\u03c0\",\"acceptable_answers\":[\"14\\u03c0\"],\"points\":5},{\"question_number\":\"19\",\"question_type\":\"fill_blank\",\"correct_answer\":\"15\",\"acceptable_answers\":[\"15\"],\"points\":5},{\"question_number\":\"20\",\"question_type\":\"fill_blank\",\"correct_answer\":\"45\\u03c0\",\"acceptable_answers\":[\"45\\u03c0\"],\"points\":5},{\"question_number\":\"21\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x^5\",\"acceptable_answers\":[\"x^5\"],\"points\":2},{\"question_number\":\"22\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 9\",\"acceptable_answers\":[\"x = 9\"],\"points\":2},{\"question_number\":\"23\",\"question_type\":\"fill_blank\",\"correct_answer\":\"6\",\"acceptable_answers\":[\"6\"],\"points\":2},{\"question_number\":\"24\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\",\"acceptable_answers\":[\"2\"],\"points\":2},{\"question_number\":\"25\",\"question_type\":\"fill_blank\",\"correct_answer\":\"2\\/5\",\"acceptable_answers\":[\"2\\/5\"],\"points\":2},{\"question_number\":\"26\",\"question_type\":\"fill_blank\",\"correct_answer\":\"x = 5\",\"acceptable_answers\":[\"x = 5\"],\"points\":20}]}', '2026-06-17 17:59:31', 0),
 (2, 'Basic', 'uploads/score_keys/sk_6a411a10c98318.87566474.pdf', 'Prod-1.0', 1, 0, '{}', '2026-06-28 12:56:48', 0),
 (3, 'Test', 'uploads/score_keys/sk_6a411beed137a6.26702306.jpg', 'Prod-1.0', 1, 0, '{}', '2026-06-28 13:04:46', 0),
-(4, 'Mathm', 'uploads/score_keys/sk_6a43723fdcd975.93548363.pdf', 'Prod-1.0', 1, 0, '[]', '2026-06-28 13:15:40', 0);
+(4, 'Mathm', '[\"uploads\\/score_keys\\/sk_6a44c1bd3d14c5.48001340.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3d65e6.21119090.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3dcfa6.52867521.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3e13d2.00428051.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3e55b8.24723857.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3e9390.07531204.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3ecfa1.33387838.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3f1152.49413726.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3f5131.64431247.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3f9053.19957240.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd3fcfe9.34302465.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd400d75.46500211.jpg\",\"uploads\\/score_keys\\/sk_6a44c1bd404980.39222746.jpg\"]', 'Prod-1.0', 1, 0, '[]', '2026-06-28 13:15:40', 0);
 
 -- --------------------------------------------------------
 
@@ -396,9 +425,9 @@ CREATE TABLE `users` (
 
 INSERT INTO `users` (`id`, `full_name`, `email`, `password`, `role`, `is_verified`, `created_at`) VALUES
 (1, 'Admin', 'admin@watotoschools.com', '$2y$10$02GjxtXOLkFNuQAhdF1umOMIoYR5.v3W0pJxan0U2x5PhAtmxKh5a', 'admin', 1, '2026-06-17 08:27:02'),
-(2, 'Teacher One', 'teacher1@school.local', '$2y$10$DZzLYsAaRPUPytPSkxXfse9hcgS/zM8cxa6HGRWS9of7KBCFf/Uka', 'teacher', 1, '2026-06-17 08:27:49'),
+(2, 'Teacher One', 'teacher1@school.local', '$2y$10$orZvXL2YBxnhC45vDOVdN.HVPQEgIvRnyBnkXpqiZPXbhBTEId49.', 'teacher', 1, '2026-06-17 08:27:49'),
 (3, 'Student One', 'student1@school.local', '$2y$10$GWHhJi/3x12UNEFwIfHtXuqCO3y0dg0TMdzcSIadvXHN2tuL0jCKK', 'student', 1, '2026-06-17 08:28:01'),
-(4, 'Teacher Two', 'teacher2@watotoschools.com', '$2y$10$k/sdmV8ErICSSqNVQ0v/Kuf8Ld4FcuPkqqhGNaLDbiml/S9FZzAKC', 'teacher', 1, '2026-06-30 07:41:27');
+(4, 'Teacher Two', 'teacher2@watotoschools.com', '$2y$10$/vVdstvr4Dl3/zOYve2XmelOfwd1Eh9Tnz9HxyabKtUZ4gOYMZkMa', 'teacher', 1, '2026-06-30 07:41:27');
 
 -- --------------------------------------------------------
 
@@ -412,6 +441,13 @@ CREATE TABLE `votes` (
   `candidate_id` int(10) UNSIGNED NOT NULL,
   `created_at` timestamp NOT NULL DEFAULT current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+--
+-- Dumping data for table `votes`
+--
+
+INSERT INTO `votes` (`id`, `user_id`, `candidate_id`, `created_at`) VALUES
+(1, 3, 1, '2026-07-01 08:47:36');
 
 --
 -- Indexes for dumped tables
@@ -512,7 +548,7 @@ ALTER TABLE `assignments`
 -- AUTO_INCREMENT for table `candidates`
 --
 ALTER TABLE `candidates`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=3;
 
 --
 -- AUTO_INCREMENT for table `help_requests`
@@ -524,13 +560,13 @@ ALTER TABLE `help_requests`
 -- AUTO_INCREMENT for table `messages`
 --
 ALTER TABLE `messages`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=37;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=44;
 
 --
 -- AUTO_INCREMENT for table `notifications`
 --
 ALTER TABLE `notifications`
-  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=71;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=78;
 
 --
 -- AUTO_INCREMENT for table `ocr_results`
@@ -542,7 +578,7 @@ ALTER TABLE `ocr_results`
 -- AUTO_INCREMENT for table `positions`
 --
 ALTER TABLE `positions`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
 
 --
 -- AUTO_INCREMENT for table `score_keys`
@@ -560,7 +596,7 @@ ALTER TABLE `users`
 -- AUTO_INCREMENT for table `votes`
 --
 ALTER TABLE `votes`
-  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
 
 --
 -- Constraints for dumped tables
