@@ -6,6 +6,58 @@ require '../includes/csrf.php';
 require '../includes/config.php';
 require_teacher();
 
+header('X-Frame-Options: DENY');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header("Content-Security-Policy: default-src 'self'; img-src 'self' data:; media-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
+
+const CHAT_ALLOWED_UPLOADS = [
+    'jpg'  => 'image/jpeg',
+    'jpeg' => 'image/jpeg',
+    'png'  => 'image/png',
+    'gif'  => 'image/gif',
+    'webp' => 'image/webp',
+    'pdf'  => 'application/pdf',
+    'mp3'  => 'audio/mpeg',
+    'wav'  => 'audio/x-wav',
+    'ogg'  => 'audio/ogg',
+    'webm' => 'audio/webm',
+];
+
+const SCORE_KEY_ALLOWED_UPLOADS = [
+    'pdf'  => 'application/pdf',
+    'png'  => 'image/png',
+    'jpg'  => 'image/jpeg',
+    'jpeg' => 'image/jpeg',
+];
+
+function safe_upload_filename($file, array $allowed, $maxSize) {
+    if (($file['size'] ?? 0) > $maxSize) {
+        throw new Exception('File "' . $file['name'] . '" is too large.');
+    }
+    $ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if (!array_key_exists($ext, $allowed)) {
+        throw new Exception('File type not allowed for "' . $file['name'] . '".');
+    }
+    if (!is_uploaded_file($file['tmp_name'])) {
+        throw new Exception('Invalid upload.');
+    }
+    $finfo = finfo_open(FILEINFO_MIME_TYPE);
+    $actualMime = finfo_file($finfo, $file['tmp_name']);
+    finfo_close($finfo);
+    if ($actualMime !== $allowed[$ext]) {
+        throw new Exception('File content does not match its extension for "' . $file['name'] . '".');
+    }
+    return bin2hex(random_bytes(16)) . '.' . $ext;
+}
+
+function harden_upload_dir($dir) {
+    $htaccess = rtrim($dir, '/').'/.htaccess';
+    if (!file_exists($htaccess)) {
+        file_put_contents($htaccess, "php_flag engine off\n<FilesMatch \"\\.(php|phtml|php\\d?|phar|cgi|pl)$\">\n  Require all denied\n</FilesMatch>\n");
+    }
+}
+
 function log_error($message, $context = []) {
     $logEntry = date('Y-m-d H:i:s') . " | " . $message;
     if (!empty($context)) {
@@ -41,7 +93,7 @@ function normalize_uploaded_files($field) {
 
 function process_score_key_uploads($files) {
     $maxSize = 40 * 1024 * 1024;
-    $allowed = ['pdf', 'png', 'jpg', 'jpeg'];
+    $allowed = SCORE_KEY_ALLOWED_UPLOADS;
 
     if (empty($files)) {
         throw new Exception('No file uploaded.');
@@ -52,14 +104,7 @@ function process_score_key_uploads($files) {
         if (($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
             throw new Exception('File upload failed: ' . get_upload_error_message($f['error'] ?? UPLOAD_ERR_NO_FILE));
         }
-        if (($f['size'] ?? 0) > $maxSize) {
-            throw new Exception('File "' . $f['name'] . '" exceeds 40 MB limit.');
-        }
-        $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
-        if (!in_array($ext, $allowed, true)) {
-            throw new Exception('Invalid score key document format. Allowed: PDF, PNG, JPG, JPEG.');
-        }
-        $exts[] = $ext;
+        $exts[] = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
     }
 
     $hasPdf = in_array('pdf', $exts, true);
@@ -67,12 +112,14 @@ function process_score_key_uploads($files) {
         throw new Exception('Only one PDF file may be uploaded at a time. To upload multiple pages, use image files instead.');
     }
 
-    if (!is_dir('uploads/score_keys')) mkdir('uploads/score_keys', 0755, true);
+    $uploadDir = 'uploads/score_keys';
+    if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
+    harden_upload_dir($uploadDir);
 
     $destPaths = [];
     foreach ($files as $f) {
-        $ext = strtolower(pathinfo($f['name'], PATHINFO_EXTENSION));
-        $destPath = 'uploads/score_keys/' . uniqid('sk_', true) . '.' . $ext;
+        $filename = safe_upload_filename($f, $allowed, $maxSize);
+        $destPath = $uploadDir . '/' . $filename;
         if (!move_uploaded_file($f['tmp_name'], $destPath)) {
             foreach ($destPaths as $done) {
                 if (file_exists($done)) @unlink($done);
@@ -188,6 +235,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action'])) {
     }
     if ($action === 'get_chat' && isset($_GET['student_id'])) {
         $student_id = (int)$_GET['student_id'];
+        $rel = $pdo->prepare("SELECT 1 FROM teacher_student WHERE teacher_id = ? AND student_id = ?");
+        $rel->execute([$teacher_id, $student_id]);
+        if (!$rel->fetch()) {
+            echo json_encode([]);
+            exit;
+        }
         $stmt = $pdo->prepare("
             SELECT m.*, u.full_name as sender_name 
             FROM messages m
@@ -390,6 +443,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!in_array($target_status, $allowedStatus, true)) {
                     throw new Exception('Invalid status value.');
                 }
+
+                $own = $pdo->prepare("
+                    SELECT a.id FROM assignments a
+                    JOIN teacher_student ts ON a.student_id = ts.student_id
+                    WHERE a.id = ? AND ts.teacher_id = ?
+                ");
+                $own->execute([$asm_id, $teacher_id]);
+                if (!$own->fetch()) throw new Exception('Access Denied: Not your assignment.');
+
                 try {
                     $stmt = $pdo->prepare("UPDATE assignments SET status = ? WHERE id = ?");
                     $stmt->execute([$target_status, $asm_id]);
@@ -414,24 +476,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $msg_body = trim($_POST['message'] ?? '');
                 if ($student_id <= 0) throw new Exception('Invalid student.');
 
+                $rel = $pdo->prepare("SELECT 1 FROM teacher_student WHERE teacher_id = ? AND student_id = ?");
+                $rel->execute([$teacher_id, $student_id]);
+                if (!$rel->fetch()) throw new Exception('Invalid or unassigned student.');
+
                 $attachment_path = null;
                 $attachment_name = null;
                 $attachment_mime = null;
-                if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] === UPLOAD_ERR_OK) {
+                if (isset($_FILES['attachment']) && $_FILES['attachment']['error'] !== UPLOAD_ERR_NO_FILE) {
                     $file = $_FILES['attachment'];
+                    if ($file['error'] !== UPLOAD_ERR_OK) {
+                        throw new Exception(get_upload_error_message($file['error']));
+                    }
                     $maxSize = 5 * 1024 * 1024;
-                    if ($file['size'] > $maxSize) throw new Exception('File too large (max 5MB).');
                     $uploadDir = 'uploads/chat/';
                     if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
-                    $ext = pathinfo($file['name'], PATHINFO_EXTENSION);
-                    $filename = uniqid('chat_', true) . '.' . $ext;
+                    harden_upload_dir($uploadDir);
+
+                    $filename = safe_upload_filename($file, CHAT_ALLOWED_UPLOADS, $maxSize);
                     $dest = $uploadDir . $filename;
                     if (!move_uploaded_file($file['tmp_name'], $dest)) {
                         throw new Exception('Failed to save file.');
                     }
                     $attachment_path = $dest;
-                    $attachment_name = $file['name'];
-                    $attachment_mime = $file['type'] ?: mime_content_type($dest);
+                    $attachment_name = basename($file['name']);
+                    $attachment_mime = mime_content_type($dest);
                 }
 
                 if ($msg_body === '' && !$attachment_path) throw new Exception('Message or file required.');
@@ -508,685 +577,978 @@ $score_keys = $pdo->query("SELECT * FROM score_keys ORDER BY id DESC")->fetchAll
     <link rel="shortcut icon" href="../WCIS_LOGO-1-removebg-preview.png" type="image/x-icon">
     <title>Teacher Dashboard</title>
     <style>
-       :root {
-	--bg: #0b1020;
-	--bg-soft: #11162b;
-	--card: #151b34;
-	--muted: #aab1c7;
-	--text: #e9ecf8;
-	--primary: #6e8bff;
-	--primary-700: #3a5dff;
-	--danger: #ff5b6e;
-	--success: #4cd4a8;
-	--radius: 16px;
-	--shadow-lg: 0 20px 60px rgba(0, 0, 0, .45);
-	--shadow-md: 0 10px 30px rgba(0, 0, 0, .35);
+:root {
+   --bg: #0b1020;
+   --bg-soft: #11162b;
+   --card: #151b34;
+   --muted: #aab1c7;
+   --text: #e9ecf8;
+   --primary: #6e8bff;
+   --primary-700: #3a5dff;
+   --danger: #ff5b6e;
+   --success: #4cd4a8;
+   --radius: 16px;
+   --shadow-lg: 0 20px 60px rgba(0, 0, 0, .45);
+   --shadow-md: 0 10px 30px rgba(0, 0, 0, .35);
 }
 
 * {
-	box-sizing: border-box;
+   box-sizing: border-box;
 }
 
 html,
 body {
-	height: 100%;
+   height: 100%;
 }
 
 body {
-	margin: 0;
-	font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial;
-	background:
-		radial-gradient(1200px 800px at 80% -10%, rgba(110, 139, 255, .18), transparent),
-		radial-gradient(900px 600px at -10% 110%, rgba(76, 212, 168, .08), transparent),
-		var(--bg);
-	color: var(--text);
+   margin: 0;
+   font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial;
+   background:
+      radial-gradient(1200px 800px at 80% -10%, rgba(110, 139, 255, .18), transparent),
+      radial-gradient(900px 600px at -10% 110%, rgba(76, 212, 168, .08), transparent),
+      var(--bg);
+   color: var(--text);
 }
 
 .container-center {
-	min-height: 100vh;
-	display: grid;
-	place-items: center;
-	padding: 40px 16px;
+   min-height: 100vh;
+   display: grid;
+   place-items: center;
+   padding: 40px 16px;
 }
 
 .card {
-	width: min(1100px, 96vw);
-	background: linear-gradient(180deg, rgba(255, 255, 255, .04), rgba(255, 255, 255, .02));
-	backdrop-filter: blur(10px);
-	border: 1px solid rgba(255, 255, 255, .08);
-	border-radius: var(--radius);
-	box-shadow: var(--shadow-lg);
+   width: min(1100px, 96vw);
+   background: linear-gradient(180deg, rgba(255, 255, 255, .04), rgba(255, 255, 255, .02));
+   backdrop-filter: blur(10px);
+   border: 1px solid rgba(255, 255, 255, .08);
+   border-radius: var(--radius);
+   box-shadow: var(--shadow-lg);
 }
 
 .card__header {
-	padding: 20px 28px 0;
+   padding: 20px 28px 0;
 }
 
 .card__body {
-	padding: 28px;
+   padding: 28px;
 }
 
 .card__title {
-	margin: 0;
-	font-size: 22px;
-	letter-spacing: .3px;
+   margin: 0;
+   font-size: 22px;
+   letter-spacing: .3px;
 }
 
 .card__sub {
-	margin: 6px 0 0;
-	color: var(--muted);
-	font-size: 13px;
+   margin: 6px 0 0;
+   color: var(--muted);
+   font-size: 13px;
 }
 
 .header {
-	display: flex;
-	align-items: center;
-	gap: 12px;
+   display: flex;
+   align-items: center;
+   gap: 12px;
 }
 
 .logo {
-	width: 70px;
-	height: 70px;
-	border-radius: 12px;
-	background: linear-gradient(135deg, var(--primary), #9eaaff);
-	box-shadow: 0 6px 24px rgba(110, 139, 255, .45);
-	display: grid;
-	place-items: center;
-	overflow: hidden;
+   width: 70px;
+   height: 70px;
+   border-radius: 12px;
+   background: linear-gradient(135deg, var(--primary), #9eaaff);
+   box-shadow: 0 6px 24px rgba(110, 139, 255, .45);
+   display: grid;
+   place-items: center;
+   overflow: hidden;
 }
 
 .logo img {
-	width: 100%;
-	height: 90%;
-	object-fit: contain;
+   width: 100%;
+   height: 90%;
+   object-fit: contain;
 }
 
 .form {
-	display: grid;
-	gap: 14px;
-	margin-top: 18px;
+   display: grid;
+   gap: 14px;
+   margin-top: 18px;
 }
 
 .label {
-	font-size: 13px;
-	color: var(--muted);
-	margin-bottom: 6px;
-	display: block;
+   font-size: 13px;
+   color: var(--muted);
+   margin-bottom: 6px;
+   display: block;
 }
 
 .input,
 .select {
-	width: 100%;
-	padding: 12px 14px;
-	border-radius: 12px;
-	color: var(--text);
-	background: #0f142a;
-	border: 1px solid rgba(255, 255, 255, .08);
-	outline: none;
+   width: 100%;
+   padding: 12px 14px;
+   border-radius: 12px;
+   color: var(--text);
+   background: #0f142a;
+   border: 1px solid rgba(255, 255, 255, .08);
+   outline: none;
 }
 
 .input:focus,
 .select:focus {
-	box-shadow: 0 0 0 3px rgba(110, 139, 255, .25);
-	border-color: rgba(110, 139, 255, .6);
+   box-shadow: 0 0 0 3px rgba(110, 139, 255, .25);
+   border-color: rgba(110, 139, 255, .6);
 }
 
 .btn {
-	cursor: pointer;
-	user-select: none;
-	border: none;
-	border-radius: 12px;
-	padding: 12px 16px;
-	font-weight: 700;
-	display: inline-block;
-	text-decoration: none;
-	text-align: center;
+   cursor: pointer;
+   user-select: none;
+   border: none;
+   border-radius: 12px;
+   padding: 12px 16px;
+   font-weight: 700;
+   display: inline-block;
+   text-decoration: none;
+   text-align: center;
 }
 
 .btn--primary {
-	background: linear-gradient(180deg, var(--primary), var(--primary-700));
-	color: #fff;
-	box-shadow: 0 10px 30px rgba(110, 139, 255, .35);
+   background: linear-gradient(180deg, var(--primary), var(--primary-700));
+   color: #fff;
+   box-shadow: 0 10px 30px rgba(110, 139, 255, .35);
 }
 
 .btn--ghost {
-	background: transparent;
-	color: var(--muted);
-	border: 1px solid rgba(255, 255, 255, .12);
+   background: transparent;
+   color: var(--muted);
+   border: 1px solid rgba(255, 255, 255, .12);
 }
 
 .btn--danger {
-	background: linear-gradient(180deg, #ff7686, #ff475f);
-	color: #fff;
+   background: linear-gradient(180deg, #ff7686, #ff475f);
+   color: #fff;
 }
 
 .btn--success {
-	background: linear-gradient(180deg, #67e3b5, #3ccf9e);
-	color: #102016;
+   background: linear-gradient(180deg, #67e3b5, #3ccf9e);
+   color: #102016;
 }
 
 .alert {
-	padding: 12px 14px;
-	border-radius: 12px;
-	font-size: 14px;
+   padding: 12px 14px;
+   border-radius: 12px;
+   font-size: 14px;
 }
 
 .alert--error {
-	background: rgba(255, 91, 110, .12);
-	border: 1px solid rgba(255, 91, 110, .3);
-	color: #ffb3bd;
+   background: rgba(255, 91, 110, .12);
+   border: 1px solid rgba(255, 91, 110, .3);
+   color: #ffb3bd;
 }
 
 .alert--success {
-	background: rgba(76, 212, 168, .12);
-	border: 1px solid rgba(76, 212, 168, .3);
-	color: #b8f3e1;
+   background: rgba(76, 212, 168, .12);
+   border: 1px solid rgba(76, 212, 168, .3);
+   color: #b8f3e1;
 }
 
 .table-wrap {
-	overflow: auto;
-	border-radius: 14px;
-	border: 1px solid rgba(255, 255, 255, .08);
-	margin-bottom: 24px;
+   overflow: auto;
+   border-radius: 14px;
+   border: 1px solid rgba(255, 255, 255, .08);
+   margin-bottom: 24px;
 }
 
 .table {
-	width: 100%;
-	border-collapse: collapse;
+   width: 100%;
+   border-collapse: collapse;
 }
 
 .table th,
 .table td {
-	padding: 14px 12px;
-	border-bottom: 1px solid rgba(255, 255, 255, .06);
-	text-align: left;
-	font-size: 14px;
+   padding: 14px 12px;
+   border-bottom: 1px solid rgba(255, 255, 255, .06);
+   text-align: left;
+   font-size: 14px;
 }
 
 .table th {
-	color: var(--muted);
-	font-weight: 600;
-	background: rgba(255, 255, 255, .02);
+   color: var(--muted);
+   font-weight: 600;
+   background: rgba(255, 255, 255, .02);
 }
 
 .table tr:hover td {
-	background: rgba(255, 255, 255, .03);
+   background: rgba(255, 255, 255, .03);
 }
 
 .toolbar {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	gap: 12px;
-	margin: 16px 0 10px;
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   gap: 12px;
+   margin: 16px 0 10px;
 }
 
 .badge {
-	padding: 6px 10px;
-	border-radius: 100px;
-	font-size: 12px;
-	border: 1px solid rgba(255, 255, 255, .12);
-	color: var(--muted);
-	display: inline-block;
+   padding: 6px 10px;
+   border-radius: 100px;
+   font-size: 12px;
+   border: 1px solid rgba(255, 255, 255, .12);
+   color: var(--muted);
+   display: inline-block;
 }
 
 .badge--assigned {
-	color: #ffca28;
-	border-color: #ffca28;
+   color: #ffca28;
+   border-color: #ffca28;
 }
 
 .badge--inprogress {
-	color: #29b6f6;
-	border-color: #29b6f6;
+   color: #29b6f6;
+   border-color: #29b6f6;
 }
 
 .badge--correction {
-	color: #ef5350;
-	border-color: #ef5350;
+   color: #ef5350;
+   border-color: #ef5350;
 }
 
 .badge--completed {
-	color: #66bb6a;
-	border-color: #66bb6a;
+   color: #66bb6a;
+   border-color: #66bb6a;
 }
 
 .modal {
-	position: fixed;
-	inset: 0;
-	display: none;
-	place-items: center;
-	background: rgba(5, 8, 18, .55);
-	z-index: 9999;
+   position: fixed;
+   inset: 0;
+   display: none;
+   place-items: center;
+   background: rgba(5, 8, 18, .55);
+   z-index: 9999;
 }
 
 .modal.open {
-	display: grid;
+   display: grid;
 }
 
 .modal__content {
-	width: min(560px, 94vw);
-	background: var(--card);
-	border: 1px solid rgba(255, 255, 255, .12);
-	border-radius: 18px;
-	box-shadow: var(--shadow-md);
+   width: min(560px, 94vw);
+   background: var(--card);
+   border: 1px solid rgba(255, 255, 255, .12);
+   border-radius: 18px;
+   box-shadow: var(--shadow-md);
 }
 
 .modal__head {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	padding: 18px 20px;
-	border-bottom: 1px solid rgba(255, 255, 255, .06);
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: 18px 20px;
+   border-bottom: 1px solid rgba(255, 255, 255, .06);
 }
 
 .modal__body {
-	padding: 18px 20px;
-	max-height: 75vh;
-	overflow-y: auto;
+   padding: 18px 20px;
+   max-height: 75vh;
+   overflow-y: auto;
 }
 
 .modal__title {
-	margin: 0;
-	font-size: 18px;
+   margin: 0;
+   font-size: 18px;
 }
 
 .logo img {
-	transition: transform 0.3s ease, filter 0.3s ease;
+   transition: transform 0.3s ease, filter 0.3s ease;
 }
 
 .logo:hover img {
-	transform: scale(1.08);
-	filter: drop-shadow(0 0 12px rgba(110, 139, 255, 0.6));
+   transform: scale(1.08);
+   filter: drop-shadow(0 0 12px rgba(110, 139, 255, 0.6));
 }
 
 @keyframes pulse {
-	0% {
-		transform: scale(1);
-		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
-	}
-	50% {
-		transform: scale(1.03);
-		filter: drop-shadow(0 0 16px rgba(110, 139, 255, 0.6));
-	}
-	100% {
-		transform: scale(1);
-		filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
-	}
+   0% {
+      transform: scale(1);
+      filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
+   }
+
+   50% {
+      transform: scale(1.03);
+      filter: drop-shadow(0 0 16px rgba(110, 139, 255, 0.6));
+   }
+
+   100% {
+      transform: scale(1);
+      filter: drop-shadow(0 0 8px rgba(110, 139, 255, 0.4));
+   }
 }
 
 .logo.pulse img {
-	animation: pulse 2.5s infinite ease-in-out;
+   animation: pulse 2.5s infinite ease-in-out;
 }
 
 .stats-grid {
-	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-	gap: 16px;
-	margin-bottom: 24px;
+   display: grid;
+   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+   gap: 16px;
+   margin-bottom: 24px;
 }
 
 .stat-box {
-	background: rgba(255, 255, 255, 0.02);
-	border: 1px solid rgba(255, 255, 255, 0.06);
-	border-radius: 12px;
-	padding: 16px;
-	text-align: center;
+   background: rgba(255, 255, 255, 0.02);
+   border: 1px solid rgba(255, 255, 255, 0.06);
+   border-radius: 12px;
+   padding: 16px;
+   text-align: center;
 }
 
 .stat-box h4 {
-	margin: 0;
-	font-size: 12px;
-	color: var(--muted);
-	text-transform: uppercase;
+   margin: 0;
+   font-size: 12px;
+   color: var(--muted);
+   text-transform: uppercase;
 }
 
 .stat-box p {
-	margin: 8px 0 0;
-	font-size: 24px;
-	font-weight: 700;
-	color: var(--primary);
+   margin: 8px 0 0;
+   font-size: 24px;
+   font-weight: 700;
+   color: var(--primary);
 }
 
 .notif-bell {
-	position: relative;
-	cursor: pointer;
+   position: relative;
+   cursor: pointer;
 }
 
 .notif-badge {
-	position: absolute;
-	top: -8px;
-	right: -8px;
-	background: var(--danger);
-	border-radius: 50%;
-	padding: 2px 6px;
-	font-size: 12px;
-	display: none;
+   position: absolute;
+   top: -8px;
+   right: -8px;
+   background: var(--danger);
+   border-radius: 50%;
+   padding: 2px 6px;
+   font-size: 12px;
+   display: none;
 }
 
 .chat-day-sep {
-	text-align: center;
-	margin: 14px 0 10px;
+   text-align: center;
+   margin: 14px 0 10px;
 }
+
 .chat-day-sep span {
-	background: rgba(255,255,255,.08);
-	color: var(--muted);
-	font-size: 11px;
-	padding: 4px 12px;
-	border-radius: 12px;
-	letter-spacing: .2px;
+   background: rgba(255, 255, 255, .08);
+   color: var(--muted);
+   font-size: 11px;
+   padding: 4px 12px;
+   border-radius: 12px;
+   letter-spacing: .2px;
 }
+
 .chat-row {
-	display: flex;
-	margin-bottom: 6px;
+   display: flex;
+   margin-bottom: 6px;
 }
-.chat-row.me { justify-content: flex-end; }
-.chat-row.them { justify-content: flex-start; }
+
+.chat-row.me {
+   justify-content: flex-end;
+}
+
+.chat-row.them {
+   justify-content: flex-start;
+}
+
 .chat-bubble {
-	position: relative;
-	max-width: 78%;
-	padding: 7px 56px 18px 10px;
-	border-radius: 10px;
-	font-size: 13px;
-	line-height: 1.4;
-	text-align: left;
-	word-wrap: break-word;
-	box-shadow: 0 1px 2px rgba(0,0,0,.25);
+   position: relative;
+   max-width: 78%;
+   padding: 7px 56px 18px 10px;
+   border-radius: 10px;
+   font-size: 13px;
+   line-height: 1.4;
+   text-align: left;
+   word-wrap: break-word;
+   box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
 }
+
 .chat-bubble.me {
-	background: linear-gradient(180deg, rgba(110,139,255,.28), rgba(110,139,255,.18));
-	border-top-right-radius: 2px;
+   background: linear-gradient(180deg, rgba(110, 139, 255, .28), rgba(110, 139, 255, .18));
+   border-top-right-radius: 2px;
 }
+
 .chat-bubble.them {
-	background: rgba(255,255,255,.06);
-	border-top-left-radius: 2px;
+   background: rgba(255, 255, 255, .06);
+   border-top-left-radius: 2px;
 }
+
 .chat-sender {
-	font-size: 11px;
-	color: var(--muted);
-	margin-bottom: 2px;
-	font-weight: 600;
+   font-size: 11px;
+   color: var(--muted);
+   margin-bottom: 2px;
+   font-weight: 600;
 }
+
 .chat-time {
-	position: absolute;
-	bottom: 4px;
-	right: 10px;
-	font-size: 10px;
-	color: rgba(233,236,248,.55);
-	white-space: nowrap;
+   position: absolute;
+   bottom: 4px;
+   right: 10px;
+   font-size: 10px;
+   color: rgba(233, 236, 248, .55);
+   white-space: nowrap;
 }
+
 .chat-bubble img {
-	max-width: 220px;
-	max-height: 160px;
-	border-radius: 8px;
-	margin-top: 4px;
-	display: block;
+   max-width: 220px;
+   max-height: 160px;
+   border-radius: 8px;
+   margin-top: 4px;
+   display: block;
 }
+
 .chat-bubble audio {
-	max-width: 230px;
-	margin-top: 4px;
-	display: block;
-	height: 36px;
+   max-width: 230px;
+   margin-top: 4px;
+   display: block;
+   height: 36px;
 }
+
 .chat-bubble a.btn {
-	margin-top: 4px;
+   margin-top: 4px;
 }
 
 .voice-recorder-bar {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	background: rgba(255,255,255,.04);
-	border: 1px solid rgba(255,255,255,.08);
-	border-radius: 24px;
-	padding: 7px 10px 7px 6px;
+   display: flex;
+   align-items: center;
+   gap: 10px;
+   background: rgba(255, 255, 255, .04);
+   border: 1px solid rgba(255, 255, 255, .08);
+   border-radius: 24px;
+   padding: 7px 10px 7px 6px;
 }
+
 .voice-rec-cancel {
-	background: none;
-	border: none;
-	color: var(--danger);
-	font-size: 16px;
-	cursor: pointer;
-	padding: 4px 8px;
-	line-height: 1;
+   background: none;
+   border: none;
+   color: var(--danger);
+   font-size: 16px;
+   cursor: pointer;
+   padding: 4px 8px;
+   line-height: 1;
 }
+
 .voice-rec-indicator {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 12px;
-	color: var(--text);
-	min-width: 52px;
+   display: flex;
+   align-items: center;
+   gap: 6px;
+   font-size: 12px;
+   color: var(--text);
+   min-width: 52px;
 }
+
 .voice-rec-pause {
-	background: none;
-	border: none;
-	cursor: pointer;
-	padding: 2px 4px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	color: var(--text);
-	font-size: 11px;
-	line-height: 1;
+   background: none;
+   border: none;
+   cursor: pointer;
+   padding: 2px 4px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   color: var(--text);
+   font-size: 11px;
+   line-height: 1;
 }
+
 .voice-rec-dot {
-	width: 9px;
-	height: 9px;
-	border-radius: 50%;
-	background: var(--danger);
-	animation: voiceRecPulse 1s infinite;
-	flex-shrink: 0;
+   width: 9px;
+   height: 9px;
+   border-radius: 50%;
+   background: var(--danger);
+   animation: voiceRecPulse 1s infinite;
+   flex-shrink: 0;
 }
+
 @keyframes voiceRecPulse {
-	0%, 100% { opacity: 1; }
-	50% { opacity: .25; }
+
+   0%,
+   100% {
+      opacity: 1;
+   }
+
+   50% {
+      opacity: .25;
+   }
 }
+
 .voice-rec-wave {
-	flex: 1;
-	display: flex;
-	align-items: center;
-	gap: 3px;
-	height: 22px;
-	overflow: hidden;
+   flex: 1;
+   display: flex;
+   align-items: center;
+   gap: 3px;
+   height: 22px;
+   overflow: hidden;
 }
+
 .voice-rec-wave span {
-	width: 3px;
-	min-height: 4px;
-	border-radius: 2px;
-	background: var(--primary);
-	animation: voiceRecWave 1.1s ease-in-out infinite;
+   width: 3px;
+   min-height: 4px;
+   border-radius: 2px;
+   background: var(--primary);
+   animation: voiceRecWave 1.1s ease-in-out infinite;
 }
-.voice-rec-wave span:nth-child(1) { height: 30%; animation-delay: 0s; }
-.voice-rec-wave span:nth-child(2) { height: 70%; animation-delay: .1s; }
-.voice-rec-wave span:nth-child(3) { height: 45%; animation-delay: .2s; }
-.voice-rec-wave span:nth-child(4) { height: 90%; animation-delay: .3s; }
-.voice-rec-wave span:nth-child(5) { height: 55%; animation-delay: .4s; }
-.voice-rec-wave span:nth-child(6) { height: 80%; animation-delay: .5s; }
-.voice-rec-wave span:nth-child(7) { height: 35%; animation-delay: .6s; }
-.voice-rec-wave span:nth-child(8) { height: 65%; animation-delay: .7s; }
+
+.voice-rec-wave span:nth-child(1) {
+   height: 30%;
+   animation-delay: 0s;
+}
+
+.voice-rec-wave span:nth-child(2) {
+   height: 70%;
+   animation-delay: .1s;
+}
+
+.voice-rec-wave span:nth-child(3) {
+   height: 45%;
+   animation-delay: .2s;
+}
+
+.voice-rec-wave span:nth-child(4) {
+   height: 90%;
+   animation-delay: .3s;
+}
+
+.voice-rec-wave span:nth-child(5) {
+   height: 55%;
+   animation-delay: .4s;
+}
+
+.voice-rec-wave span:nth-child(6) {
+   height: 80%;
+   animation-delay: .5s;
+}
+
+.voice-rec-wave span:nth-child(7) {
+   height: 35%;
+   animation-delay: .6s;
+}
+
+.voice-rec-wave span:nth-child(8) {
+   height: 65%;
+   animation-delay: .7s;
+}
+
 @keyframes voiceRecWave {
-	0%, 100% { transform: scaleY(.35); }
-	50% { transform: scaleY(1); }
+
+   0%,
+   100% {
+      transform: scaleY(.35);
+   }
+
+   50% {
+      transform: scaleY(1);
+   }
 }
+
 .voice-rec-wave.paused span {
-	animation-play-state: paused;
+   animation-play-state: paused;
 }
+
 .voice-rec-replay {
-	background: rgba(255,255,255,.12);
-	border: none;
-	color: var(--text);
-	width: 26px;
-	height: 26px;
-	min-width: 26px;
-	border-radius: 50%;
-	cursor: pointer;
-	font-size: 11px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	flex-shrink: 0;
+   background: rgba(255, 255, 255, .12);
+   border: none;
+   color: var(--text);
+   width: 26px;
+   height: 26px;
+   min-width: 26px;
+   border-radius: 50%;
+   cursor: pointer;
+   font-size: 11px;
+   display: inline-flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
 }
+
 .voice-rec-replay:hover {
-	background: rgba(255,255,255,.2);
+   background: rgba(255, 255, 255, .2);
 }
+
 .voice-rec-send {
-	background: var(--primary);
-	border: none;
-	color: #fff;
-	width: 32px;
-	height: 32px;
-	min-width: 32px;
-	border-radius: 50%;
-	cursor: pointer;
-	font-size: 14px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	flex-shrink: 0;
+   background: var(--primary);
+   border: none;
+   color: #fff;
+   width: 32px;
+   height: 32px;
+   min-width: 32px;
+   border-radius: 50%;
+   cursor: pointer;
+   font-size: 14px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
 }
 
 .voice-msg-player {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	margin-top: 4px;
-	min-width: 200px;
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   margin-top: 4px;
+   min-width: 200px;
 }
+
 .vmp-btn {
-	background: rgba(255,255,255,.12);
-	border: none;
-	color: var(--text);
-	width: 28px;
-	height: 28px;
-	min-width: 28px;
-	border-radius: 50%;
-	cursor: pointer;
-	font-size: 12px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	flex-shrink: 0;
+   background: rgba(255, 255, 255, .12);
+   border: none;
+   color: var(--text);
+   width: 28px;
+   height: 28px;
+   min-width: 28px;
+   border-radius: 50%;
+   cursor: pointer;
+   font-size: 12px;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   flex-shrink: 0;
 }
-.vmp-btn:hover { background: rgba(255,255,255,.2); }
+
+.vmp-btn:hover {
+   background: rgba(255, 255, 255, .2);
+}
+
 .vmp-progress {
-	flex: 1;
-	height: 4px;
-	background: rgba(255,255,255,.15);
-	border-radius: 2px;
-	cursor: pointer;
-	position: relative;
+   flex: 1;
+   height: 4px;
+   background: rgba(255, 255, 255, .15);
+   border-radius: 2px;
+   cursor: pointer;
+   position: relative;
 }
+
 .vmp-progress-fill {
-	height: 100%;
-	width: 0%;
-	background: var(--primary);
-	border-radius: 2px;
+   height: 100%;
+   width: 0%;
+   background: var(--primary);
+   border-radius: 2px;
 }
+
 .vmp-time {
-	font-size: 10px;
-	color: rgba(233,236,248,.6);
-	min-width: 32px;
-	text-align: right;
-	flex-shrink: 0;
+   font-size: 10px;
+   color: rgba(233, 236, 248, .6);
+   min-width: 32px;
+   text-align: right;
+   flex-shrink: 0;
 }
 
 .attach-media-wrap {
-	position: relative;
-	display: inline-block;
-	max-width: 100%;
+   position: relative;
+   display: inline-block;
+   max-width: 100%;
 }
+
 .attach-download-icon {
-	position: absolute;
-	top: 6px;
-	right: 6px;
-	width: 22px;
-	height: 22px;
-	border-radius: 50%;
-	background: rgba(0,0,0,.55);
-	color: #fff;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-size: 11px;
-	text-decoration: none;
-	line-height: 1;
+   position: absolute;
+   top: 6px;
+   right: 6px;
+   width: 22px;
+   height: 22px;
+   border-radius: 50%;
+   background: rgba(0, 0, 0, .55);
+   color: #fff;
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   font-size: 11px;
+   text-decoration: none;
+   line-height: 1;
 }
+
 .attach-download-icon:hover {
-	background: rgba(0,0,0,.75);
+   background: rgba(0, 0, 0, .75);
 }
+
 .vmp-download {
-	width: 22px;
-	height: 22px;
-	min-width: 22px;
-	border-radius: 50%;
-	background: rgba(255,255,255,.12);
-	color: var(--text);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-size: 10px;
-	text-decoration: none;
-	flex-shrink: 0;
+   width: 22px;
+   height: 22px;
+   min-width: 22px;
+   border-radius: 50%;
+   background: rgba(255, 255, 255, .12);
+   color: var(--text);
+   display: flex;
+   align-items: center;
+   justify-content: center;
+   font-size: 10px;
+   text-decoration: none;
+   flex-shrink: 0;
 }
+
 .vmp-download:hover {
-	background: rgba(255,255,255,.2);
+   background: rgba(255, 255, 255, .2);
 }
 
 .hidden {
-	display: none;
+   display: none;
 }
-    
-@keyframes fadeInUp { from { opacity:0; transform:translateY(14px);} to { opacity:1; transform:translateY(0);} }
-@keyframes modalPop { from { opacity:0; transform:scale(.92);} to { opacity:1; transform:scale(1);} }
-@keyframes badgePop { 0%{transform:scale(.8);} 60%{transform:scale(1.08);} 100%{transform:scale(1);} }
-@keyframes shakeX { 10%,90%{transform:translateX(-1px);} 20%,80%{transform:translateX(2px);} 30%,50%,70%{transform:translateX(-4px);} 40%,60%{transform:translateX(4px);} }
-@keyframes rowIn { from { opacity:0; transform:translateX(-6px);} to { opacity:1; transform:translateX(0);} }
-@keyframes bellRing { 0%,100%{transform:rotate(0);} 10%,30%{transform:rotate(-12deg);} 20%,40%{transform:rotate(12deg);} 50%{transform:rotate(0);} }
 
-.card { animation: fadeInUp .5s ease both; }
-.btn { transition: transform .18s ease, box-shadow .18s ease, filter .18s ease; }
-.btn:hover { transform: translateY(-2px); filter: brightness(1.08); }
-.btn:active { transform: translateY(0) scale(.96); }
-.input, .select { transition: box-shadow .25s ease, border-color .25s ease, transform .15s ease; }
-.input:focus, .select:focus { transform: translateY(-1px); }
-.badge { animation: badgePop .35s ease; }
-.alert--error { animation: shakeX .4s ease; }
-.modal__content { animation: modalPop .25s ease; }
-.table-wrap { -webkit-overflow-scrolling: touch; }
-.table tbody tr { animation: rowIn .35s ease both; transition: background .2s ease; }
-.logo { transition: transform .3s ease, filter .3s ease; }
-.notif-bell:hover { animation: bellRing .5s ease; }
-.chat-bubble { transition: transform .15s ease; }
-.chat-row:hover .chat-bubble { transform: translateY(-1px); }
+@keyframes fadeInUp {
+   from {
+      opacity: 0;
+      transform: translateY(14px);
+   }
+
+   to {
+      opacity: 1;
+      transform: translateY(0);
+   }
+}
+
+@keyframes modalPop {
+   from {
+      opacity: 0;
+      transform: scale(.92);
+   }
+
+   to {
+      opacity: 1;
+      transform: scale(1);
+   }
+}
+
+@keyframes badgePop {
+   0% {
+      transform: scale(.8);
+   }
+
+   60% {
+      transform: scale(1.08);
+   }
+
+   100% {
+      transform: scale(1);
+   }
+}
+
+@keyframes shakeX {
+
+   10%,
+   90% {
+      transform: translateX(-1px);
+   }
+
+   20%,
+   80% {
+      transform: translateX(2px);
+   }
+
+   30%,
+   50%,
+   70% {
+      transform: translateX(-4px);
+   }
+
+   40%,
+   60% {
+      transform: translateX(4px);
+   }
+}
+
+@keyframes rowIn {
+   from {
+      opacity: 0;
+      transform: translateX(-6px);
+   }
+
+   to {
+      opacity: 1;
+      transform: translateX(0);
+   }
+}
+
+@keyframes bellRing {
+
+   0%,
+   100% {
+      transform: rotate(0);
+   }
+
+   10%,
+   30% {
+      transform: rotate(-12deg);
+   }
+
+   20%,
+   40% {
+      transform: rotate(12deg);
+   }
+
+   50% {
+      transform: rotate(0);
+   }
+}
+
+.card {
+   animation: fadeInUp .5s ease both;
+}
+
+.btn {
+   transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
+}
+
+.btn:hover {
+   transform: translateY(-2px);
+   filter: brightness(1.08);
+}
+
+.btn:active {
+   transform: translateY(0) scale(.96);
+}
+
+.input,
+.select {
+   transition: box-shadow .25s ease, border-color .25s ease, transform .15s ease;
+}
+
+.input:focus,
+.select:focus {
+   transform: translateY(-1px);
+}
+
+.badge {
+   animation: badgePop .35s ease;
+}
+
+.alert--error {
+   animation: shakeX .4s ease;
+}
+
+.modal__content {
+   animation: modalPop .25s ease;
+}
+
+.table-wrap {
+   -webkit-overflow-scrolling: touch;
+}
+
+.table tbody tr {
+   animation: rowIn .35s ease both;
+   transition: background .2s ease;
+}
+
+.logo {
+   transition: transform .3s ease, filter .3s ease;
+}
+
+.notif-bell:hover {
+   animation: bellRing .5s ease;
+}
+
+.chat-bubble {
+   transition: transform .15s ease;
+}
+
+.chat-row:hover .chat-bubble {
+   transform: translateY(-1px);
+}
 
 @media (max-width: 900px) {
-    .container-center { padding: 20px 12px; }
-    .card { width: 100%; }
-    .card__body, .card__header { padding: 18px; }
-    .row { grid-template-columns: 1fr; }
-    .toolbar { flex-wrap: wrap; gap: 10px; }
-    .header { flex-wrap: wrap; }
-    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+   .container-center {
+      padding: 20px 12px;
+   }
+
+   .card {
+      width: 100%;
+   }
+
+   .card__body,
+   .card__header {
+      padding: 18px;
+   }
+
+   .row {
+      grid-template-columns: 1fr;
+   }
+
+   .toolbar {
+      flex-wrap: wrap;
+      gap: 10px;
+   }
+
+   .header {
+      flex-wrap: wrap;
+   }
+
+   .stats-grid {
+      grid-template-columns: repeat(2, 1fr);
+   }
 }
 
 @media (max-width: 640px) {
-    .card__title { font-size: 19px; }
-    .card__sub { font-size: 12px; }
-    .btn { padding: 10px 14px; font-size: 13.5px; }
-    .modal__content { width: 96vw; max-height: 88vh; overflow: auto; }
-    .modal__body { padding: 14px 16px; }
-    .table th, .table td { padding: 10px 8px; font-size: 12.5px; }
-    .logo { width: 56px; height: 56px; }
-    .chat-bubble { max-width: 88%; }
-    header .header > div[style*="display:flex"] { flex-wrap: wrap; }
+   .card__title {
+      font-size: 19px;
+   }
+
+   .card__sub {
+      font-size: 12px;
+   }
+
+   .btn {
+      padding: 10px 14px;
+      font-size: 13.5px;
+   }
+
+   .modal__content {
+      width: 96vw;
+      max-height: 88vh;
+      overflow: auto;
+   }
+
+   .modal__body {
+      padding: 14px 16px;
+   }
+
+   .table th,
+   .table td {
+      padding: 10px 8px;
+      font-size: 12.5px;
+   }
+
+   .logo {
+      width: 56px;
+      height: 56px;
+   }
+
+   .chat-bubble {
+      max-width: 88%;
+   }
+
+   header .header>div[style*="display:flex"] {
+      flex-wrap: wrap;
+   }
 }
 
 @media (max-width: 420px) {
-    .card__body { padding: 14px; }
-    .toolbar { flex-direction: column; align-items: stretch; }
-    .toolbar .btn { width: 100%; }
-    .modal__head { padding: 14px 16px; }
-    .stats-grid { grid-template-columns: 1fr 1fr; }
+   .card__body {
+      padding: 14px;
+   }
+
+   .toolbar {
+      flex-direction: column;
+      align-items: stretch;
+   }
+
+   .toolbar .btn {
+      width: 100%;
+   }
+
+   .modal__head {
+      padding: 14px 16px;
+   }
+
+   .stats-grid {
+      grid-template-columns: 1fr 1fr;
+   }
 }
 
 </style>
@@ -1534,11 +1896,11 @@ async function openAssignmentViewer(asmId) {
         document.getElementById('lifecycle_assignment_id').value = asmId;
         let container = document.getElementById('assignmentDetailsContent');
         container.innerHTML = `
-            <div><strong>Student Target:</strong> ${data.student_name}</div>
-            <div><strong>PACE Name:</strong> ${data.pace}</div>
-            <div><strong>Due Milestone:</strong> ${data.due_date}</div>
-            <div><strong>Score Key:</strong> ${data.score_key_version || 'No Score Key Attached'}</div>
-            <div><strong>Current Status:</strong> <span class="badge">${data.status}</span></div>
+            <div><strong>Student Target:</strong> ${esc(data.student_name)}</div>
+            <div><strong>PACE Name:</strong> ${esc(data.pace)}</div>
+            <div><strong>Due Milestone:</strong> ${esc(data.due_date)}</div>
+            <div><strong>Score Key:</strong> ${esc(data.score_key_version || 'No Score Key Attached')}</div>
+            <div><strong>Current Status:</strong> <span class="badge">${esc(data.status)}</span></div>
         `;
         openModal('assignmentViewModal');
     }
@@ -1709,6 +2071,12 @@ document.getElementById('teacherVoiceReplayBtn').addEventListener('click', repla
 function chatParseDate(ts) {
     return new Date(String(ts).replace(' ', 'T'));
 }
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = (s === null || s === undefined) ? '' : String(s);
+    return d.innerHTML;
+}
+
 function chatFormatTime(ts) {
     let d = chatParseDate(ts);
     let h = d.getHours(), m = d.getMinutes();
@@ -1806,33 +2174,34 @@ async function openChatModal(studentId, studentName) {
             markup += `<div class="chat-day-sep"><span>${day}</span></div>`;
             lastDay = day;
         }
-        let isMe = m.sender_id == <?= $teacher_id ?>;
+        let isMe = m.sender_id == <?= (int)$teacher_id ?>;
         let attachmentHtml = '';
         if (m.attachment_path) {
+            const safePath = esc(m.attachment_path);
             const ext = m.attachment_path.split('.').pop().toLowerCase();
-            const fileName = m.attachment_name || 'download';
-            let downloadIcon = `<a href="${m.attachment_path}" download="${fileName}" class="attach-download-icon" title="Download">⬇</a>`;
+            const fileName = esc(m.attachment_name || 'download');
+            let downloadIcon = `<a href="${safePath}" download="${fileName}" class="attach-download-icon" title="Download">⬇</a>`;
             if (['jpg','jpeg','png','gif','webp'].includes(ext)) {
-                attachmentHtml = `<div class="attach-media-wrap"><img src="${m.attachment_path}" alt="attachment">${downloadIcon}</div>`;
+                attachmentHtml = `<div class="attach-media-wrap"><img src="${safePath}" alt="attachment">${downloadIcon}</div>`;
             } else if (['mp3','wav','ogg','webm'].includes(ext) || (m.attachment_mime && m.attachment_mime.startsWith('audio/'))) {
                 attachmentHtml = `<div class="voice-msg-player">
                     <button type="button" class="vmp-btn vmp-playpause" title="Play">▶</button>
                     <div class="vmp-progress"><div class="vmp-progress-fill"></div></div>
                     <span class="vmp-time">0:00</span>
                     <button type="button" class="vmp-btn vmp-replay" title="Replay">⟲</button>
-                    <audio class="vmp-audio" src="${m.attachment_path}" preload="metadata" style="display:none;"></audio>
-                    <a href="${m.attachment_path}" download="${fileName}" class="vmp-download" title="Download">⬇</a>
+                    <audio class="vmp-audio" src="${safePath}" preload="metadata" style="display:none;"></audio>
+                    <a href="${safePath}" download="${fileName}" class="vmp-download" title="Download">⬇</a>
                 </div>`;
             } else {
-                attachmentHtml = `<div><a href="${m.attachment_path}" download="${fileName}" class="btn btn--ghost">📎 ${fileName}</a></div>`;
+                attachmentHtml = `<div><a href="${safePath}" download="${fileName}" class="btn btn--ghost">📎 ${fileName}</a></div>`;
             }
         }
         markup += `<div class="chat-row ${isMe ? 'me' : 'them'}">
             <div class="chat-bubble ${isMe ? 'me' : 'them'}">
-                ${isMe ? '' : `<div class="chat-sender">${m.sender_name}</div>`}
-                ${m.body || ''}
+                ${isMe ? '' : `<div class="chat-sender">${esc(m.sender_name)}</div>`}
+                ${esc(m.body || '')}
                 ${attachmentHtml}
-                <span class="chat-time">${chatFormatTime(m.created_at)}</span>
+                <span class="chat-time">${esc(chatFormatTime(m.created_at))}</span>
             </div>
         </div>`;
     });
@@ -1898,13 +2267,13 @@ async function openNotifications() {
     } else {
         let html = '';
         notifs.forEach(n => {
-            let from = n.sender_name || n.sender_email || 'Unknown';
+            let from = esc(n.sender_name || n.sender_email || 'Unknown');
             html += `<div style="padding:10px; background:rgba(255,255,255,0.03); border-radius:8px; border:1px solid rgba(255,255,255,0.06);">
                 <div style="font-size:11px; color:var(--primary); font-weight:600; margin-bottom:2px;">${from}</div>
-                <div style="font-size:13px;">${n.message}</div>
-                <div style="font-size:11px; color:var(--muted);">${n.created_at}</div>
+                <div style="font-size:13px;">${esc(n.message)}</div>
+                <div style="font-size:11px; color:var(--muted);">${esc(n.created_at)}</div>
             </div>`;
-            fetch('?action=mark_notification_read&id=' + n.id);
+            fetch('?action=mark_notification_read&id=' + encodeURIComponent(n.id));
         });
         container.innerHTML = html;
     }
