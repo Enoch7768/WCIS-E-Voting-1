@@ -35,37 +35,30 @@ A PHP-based web portal for Watoto Christian International School (WCIS) that ser
 ## Project Structure
 ```
 /auth/
-  login.php          # Unified login for all roles/services
-  logout.php         # Session teardown
-/dashboard/           # Voting-service views
+  login.php          
+  logout.php        
+/dashboard/          
   admin.php
   teacher.php
   student.php
-/dashboard2/           # Online-service views (same role split)
+/dashboard2/           
   admin.php
   teacher.php
   student.php
 /includes/
-  db.php             # PDO connection
-  auth.php           # require_admin(), require_teacher(), require_student() guards
-  csrf.php           # csrf_token(), csrf_check()
+  db.php            
+  auth.php           
+  csrf.php           
   config.php
 ```
-*(Note: `/dashboard` vs `/dashboard2` paths are inferred from `login.php`'s redirect logic — adjust to match your actual folder layout.)*
 
-## Setup
-1. Create a MySQL database and import your schema (`users`, `positions`, `candidates`, `votes`, `teacher_student`, `assignments`, `score_keys`, `notifications`).
-2. Configure database credentials in `includes/db.php`.
-3. Ensure the web server has write access to a `logs/` directory under the teacher dashboard path (used for error logging).
-4. Seed at least one verified admin user (`is_verified = 1`) directly in the database to bootstrap access.
-5. Serve the project root with PHP (e.g., `php -S localhost:8000`) and navigate to `/auth/login.php`.
 
 ## Roles & Access Control
-| Role    | Voting Service                          | Online Service                                  |
-|---------|------------------------------------------|--------------------------------------------------|
-| Admin   | Manage positions/candidates *(assumed)*  | Manage users, assign students to teachers       |
-| Teacher | —                                         | Assign pacing, manage score keys, message students |
-| Student | View candidates and vote                 | View pacing/assignments *(assumed)*             |
+| Role    | Voting Service                                          | Online Service                                    |
+|---------|---------------------------------------------------------|---------------------------------------------------|
+| Admin   | Manage positions/candidates and view results            | Manage users, assign students to teachers         |
+| Teacher | View voting results                                     | Assign pacing, manage score keys, message students|
+| Student | View candidates and vote                                | Chat with teachers and access score keys          |
 
 ## Security Notes
 - All state-changing POST requests are protected by CSRF tokens.
